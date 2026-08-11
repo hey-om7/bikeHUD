@@ -18,6 +18,8 @@
 #include "wifi_provision.h"
 #include "ui_screens.h"
 #include "dashboard.h"
+#include "server_connection.h"
+#include "nav_display.h"
 
 // ===== Display Setup =====
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
@@ -40,6 +42,7 @@ bool  imuConnected = false;
 // Hardware Timers
 unsigned long lastIMURead = 0;
 unsigned long lastDisplayUpdate = 0;
+bool serverConnectionStarted = false;
 
 // GPS Serial
 HardwareSerial gpsSerial(1);
@@ -169,10 +172,33 @@ void loop() {
         lastWifiRetry = now;
       }
 
-      // Update display at 10Hz
-      if (now - lastDisplayUpdate >= 100) {
-        updateDashboard();
-        lastDisplayUpdate = now;
+      // --- Server connection: start after WiFi connects (background, non-blocking) ---
+      if (hotspotConnected && !serverConnectionStarted) {
+        initServerConnection();
+        serverConnectionStarted = true;
+      }
+      if (serverConnectionStarted) {
+        serverConnectionLoop();
+        // Update server with GPS data (development: dummy coords)
+        updateDeviceGPS(deviceLat, deviceLng, gpsFix);
+      }
+
+      // --- Navigation mode handling ---
+      if (isNavDisplayActive()) {
+        // In navigation mode: render nav screen instead of dashboard
+        if (!navDisplayLoop()) {
+          // Navigation ended, re-init dashboard display
+          initDashboard();
+        }
+      } else if (getNavState() == NAV_ACTIVE) {
+        // Server just started navigation - switch to nav display
+        enterNavMode();
+      } else {
+        // Normal dashboard display at 10Hz
+        if (now - lastDisplayUpdate >= 100) {
+          updateDashboard();
+          lastDisplayUpdate = now;
+        }
       }
       break;
   }

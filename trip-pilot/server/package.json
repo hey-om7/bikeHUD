@@ -1,0 +1,17 @@
+{
+  "name": "trip-pilot-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Navigation backend for Tripper ESP32-S3 device",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "ws": "8.18.1",
+    "cors": "2.8.5",
+    "@googlemaps/google-maps-services-js": "3.4.0"
+  }
+}
