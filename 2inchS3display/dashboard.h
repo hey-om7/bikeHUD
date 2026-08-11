@@ -22,6 +22,7 @@ static float prevHead = -999.0;
 static int prevSats = -1;
 static bool prevFix = false;
 static bool prevHotspot = false;
+static ServerState prevServerState = SRV_DISCONNECTED;
 static float dummyHeadingOffset = 0.0f;
 
 // ===== Rendering Helpers =====
@@ -462,12 +463,13 @@ void updateDashboard() {
     prevAlt = gpsAltitude;
   }
 
-  if (gpsSatellites != prevSats || gpsFix != prevFix || hotspotConnected != prevHotspot) {
+  if (gpsSatellites != prevSats || gpsFix != prevFix || hotspotConnected != prevHotspot || getServerState() != prevServerState) {
     updateHeaderBar();
     updateCenterInfo();
     prevSats = gpsSatellites;
     prevFix = gpsFix;
     prevHotspot = hotspotConnected;
+    prevServerState = getServerState();
   }
 }
 
