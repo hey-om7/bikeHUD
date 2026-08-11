@@ -5,6 +5,7 @@
  * - Route generation and chunking
  */
 
+import 'dotenv/config';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';

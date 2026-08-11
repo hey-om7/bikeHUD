@@ -9,9 +9,10 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
-    "express": "4.21.2",
-    "ws": "8.18.1",
+    "@googlemaps/google-maps-services-js": "3.4.0",
     "cors": "2.8.5",
-    "@googlemaps/google-maps-services-js": "3.4.0"
+    "dotenv": "^16.4.7",
+    "express": "4.21.2",
+    "ws": "8.18.1"
   }
 }

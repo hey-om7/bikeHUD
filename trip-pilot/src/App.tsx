@@ -48,9 +48,10 @@ interface NavSummary {
 }
 
 interface SearchResult {
-  display_name: string
-  lat: string
-  lon: string
+  name: string
+  address: string
+  lat: number
+  lng: number
 }
 
 // ===== Map Click Handler =====
@@ -163,21 +164,13 @@ function App() {
       setSearching(true)
       try {
         const encoded = encodeURIComponent(value.trim())
-        // Use device location (or default Kharadi) to bias results by proximity
         const lat = device?.lat ?? DEFAULT_CENTER[0]
         const lng = device?.lng ?? DEFAULT_CENTER[1]
         const res = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encoded}&limit=8&addressdetails=1&countrycodes=in&viewbox=68.0,6.0,97.5,37.0&bounded=1`,
-          { headers: { 'Accept': 'application/json' } }
+          `${API_BASE}/api/search?q=${encoded}&lat=${lat}&lng=${lng}`
         )
         const results: SearchResult[] = await res.json()
-        // Sort by distance from current position (nearest first)
-        results.sort((a, b) => {
-          const distA = Math.hypot(parseFloat(a.lat) - lat, parseFloat(a.lon) - lng)
-          const distB = Math.hypot(parseFloat(b.lat) - lat, parseFloat(b.lon) - lng)
-          return distA - distB
-        })
-        setSuggestions(results.slice(0, 5))
+        setSuggestions(results)
         setShowSuggestions(results.length > 0)
       } catch {
         setSuggestions([])
@@ -189,9 +182,9 @@ function App() {
 
   // Select a suggestion
   const handleSelectSuggestion = (result: SearchResult) => {
-    setDestLat(parseFloat(result.lat))
-    setDestLng(parseFloat(result.lon))
-    setSearchQuery(result.display_name.split(',').slice(0, 2).join(','))
+    setDestLat(result.lat)
+    setDestLng(result.lng)
+    setSearchQuery(result.name)
     setSuggestions([])
     setShowSuggestions(false)
     setError('')
@@ -316,7 +309,7 @@ function App() {
             {showSuggestions && suggestions.length > 0 && (
               <ul className="suggestions-list">
                 {suggestions.map((result, i) => (
-                  <li key={`${result.lat}-${result.lon}-${i}`}>
+                  <li key={`${result.lat}-${result.lng}-${i}`}>
                     <button
                       className="suggestion-item"
                       onClick={() => handleSelectSuggestion(result)}
@@ -327,9 +320,8 @@ function App() {
                         <circle cx="12" cy="10" r="3"/>
                       </svg>
                       <span className="suggestion-text">
-                        {result.display_name.length > 60
-                          ? result.display_name.substring(0, 58) + '...'
-                          : result.display_name}
+                        <strong>{result.name}</strong>
+                        <small>{result.address.length > 50 ? result.address.substring(0, 48) + '...' : result.address}</small>
                       </span>
                     </button>
                   </li>
