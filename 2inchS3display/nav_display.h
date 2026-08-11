@@ -1,10 +1,10 @@
 /*
- * nav_display.h - Navigation display rendering for ESP32-S3
+ * nav_display.h - Minimalist pseudo-3D perspective navigation display
  * Tripper Telemetry Dashboard V5
  *
- * Renders turn-by-turn navigation with breadcrumb path on the display.
- * Dark background with white navigation graphics (compact device aesthetic).
- * Only renders when navigation is active; returns to dashboard when done.
+ * Centralized forward-perspective path with chevron position indicator,
+ * inline distance/turn display, and curved progress arc.
+ * Full black canvas — no top bars, no text clutter.
  */
 #ifndef NAV_DISPLAY_H
 #define NAV_DISPLAY_H
@@ -18,162 +18,285 @@ extern Arduino_GFX *gfx;
 
 // Navigation display colors
 #define NAV_BG         0x0000   // Black background
-#define NAV_PATH       0xFFFF   // White path/breadcrumb
-#define NAV_ARROW      0xFFFF   // White arrow
+#define NAV_PATH       0xFFFF   // White path
+#define NAV_ARROW      0xFFFF   // White arrow/chevron
 #define NAV_TEXT       0xFFFF   // White text
-#define NAV_DIM        0x7BCF   // Dimmed gray
-#define NAV_ACCENT     0xFDA0   // Orange accent (#FFB400)
-#define NAV_DISTANCE   0x2D7F   // Blue for distance
+#define NAV_DIM        0x4208   // Dimmed gray for motion lines / background arcs
+#define NAV_ACCENT     0xFDA0   // Orange accent
+#define NAV_SHADOW     0x2104   // Dark shadow for 3D bevel
+
+// Layout anchors
+#define NAV_CX         160      // Horizontal center
+#define NAV_PATH_BOT_Y 175      // Path origin (bottom of path area)
+#define NAV_PATH_TOP_Y 20       // Path vanishing point area
 
 static bool navDisplayActive = false;
 static unsigned long lastNavRender = 0;
 
-// ===== Draw Turn Arrow =====
-// Draws a large directional arrow based on direction code
-void drawTurnArrow(int cx, int cy, const char* direction) {
-  int arrowSize = 40;
+// drawThickLine is defined in dashboard.h — reused here
 
-  // Clear arrow area
-  gfx->fillRect(cx - 50, cy - 50, 100, 100, NAV_BG);
+// ===== Draw Speed/Motion Lines =====
+// Horizontal streaks trailing off the path sides for velocity feel
+static void drawMotionLines(int pathX, int pathY, int spread) {
+  // Draw 4 pairs of motion lines at various heights
+  for (int i = 0; i < 4; i++) {
+    int y = pathY - 20 - i * 30;
+    if (y < NAV_PATH_TOP_Y) break;
+
+    int lineLen = 15 + i * 5;
+    int offset = spread - i * 4;
+    if (offset < 8) offset = 8;
+
+    // Left side motion lines
+    gfx->drawFastHLine(NAV_CX - offset - lineLen, y, lineLen, NAV_DIM);
+    gfx->drawFastHLine(NAV_CX - offset - lineLen + 3, y + 8, lineLen - 6, NAV_DIM);
+
+    // Right side motion lines
+    gfx->drawFastHLine(NAV_CX + offset, y, lineLen, NAV_DIM);
+    gfx->drawFastHLine(NAV_CX + offset + 3, y + 8, lineLen - 6, NAV_DIM);
+  }
+}
+
+// ===== Draw Breadcrumb Path (Pseudo-3D Perspective) =====
+// Road originates from lower-center and zigzags upward toward vanishing point
+void drawBreadcrumbPath(NavChunk* chunk) {
+  // Build path points from chunk offsets, mapped to perspective
+  // Each successive point is higher on screen (further away) and narrower (perspective)
+
+  int numPoints = chunk->pathPointCount;
+  if (numPoints < 1) numPoints = 1;
+  if (numPoints > 10) numPoints = 10;
+
+  // Generate perspective-mapped points
+  // Y goes from NAV_PATH_BOT_Y up to NAV_PATH_TOP_Y
+  // X converges toward center as Y goes up (perspective narrowing)
+
+  int pathX[11];
+  int pathY[11];
+
+  // Origin point at bottom center
+  pathX[0] = NAV_CX;
+  pathY[0] = NAV_PATH_BOT_Y;
+
+  float yStep = (float)(NAV_PATH_BOT_Y - NAV_PATH_TOP_Y) / (float)(numPoints + 1);
+
+  for (int i = 0; i < numPoints; i++) {
+    // Perspective factor: 1.0 at bottom, shrinks toward top
+    float t = (float)(i + 1) / (float)(numPoints + 1);
+    float perspective = 1.0f - t * 0.7f; // Narrows to 30% at the top
+
+    // Use chunk path offsets for lateral displacement
+    int offsetX = 0;
+    if (i < chunk->pathPointCount) {
+      offsetX = chunk->pathOffsets[i * 2]; // X offset from data
+    }
+
+    // Scale offset by perspective
+    pathX[i + 1] = NAV_CX + (int)(offsetX * 2.5f * perspective);
+    pathY[i + 1] = NAV_PATH_BOT_Y - (int)(yStep * (i + 1));
+  }
+
+  int totalPts = numPoints + 1;
+
+  // Draw the thick white path segments
+  int baseThickness = 8;
+  for (int i = 0; i < totalPts - 1; i++) {
+    // Thickness decreases with perspective
+    float t = (float)i / (float)(totalPts - 1);
+    int thick = baseThickness - (int)(t * 5);
+    if (thick < 2) thick = 2;
+
+    drawThickLine(pathX[i], pathY[i], pathX[i + 1], pathY[i + 1], thick, NAV_PATH);
+  }
+
+  // Draw motion/speed lines beside the path
+  int spread = 35;
+  drawMotionLines(pathX[0], pathY[0], spread);
+}
+
+// ===== Draw Position Chevron (3D Arrowhead) =====
+// Prominent chevron at the bottom-center of the path
+static void drawPositionChevron(int cx, int cy) {
+  // Chevron dimensions
+  int chevW = 18;  // Half-width
+  int chevH = 22;  // Total height (tip to tail)
+  int innerH = 10; // Inner cutout depth
+
+  // Shadow (offset down-right by 2px)
+  int sx = cx + 1;
+  int sy = cy + 2;
+  gfx->fillTriangle(sx, sy - chevH / 2,
+                    sx - chevW, sy + chevH / 2,
+                    sx + chevW, sy + chevH / 2, NAV_SHADOW);
+  gfx->fillTriangle(sx, sy + chevH / 2 - innerH,
+                    sx - chevW + 6, sy + chevH / 2,
+                    sx + chevW - 6, sy + chevH / 2, NAV_SHADOW);
+
+  // Main white chevron (pointing up)
+  gfx->fillTriangle(cx, cy - chevH / 2,
+                    cx - chevW, cy + chevH / 2,
+                    cx + chevW, cy + chevH / 2, NAV_ARROW);
+
+  // Inner dark cutout to create the "V" / bevel effect
+  gfx->fillTriangle(cx, cy + chevH / 2 - innerH,
+                    cx - chevW + 6, cy + chevH / 2,
+                    cx + chevW - 6, cy + chevH / 2, NAV_BG);
+
+  // Small inner highlight triangle for 3D depth
+  gfx->fillTriangle(cx, cy - chevH / 2 + 4,
+                    cx - chevW + 7, cy + chevH / 2 - innerH - 2,
+                    cx + chevW - 7, cy + chevH / 2 - innerH - 2, NAV_DIM);
+}
+
+// ===== Draw Minimalist Turn Icon =====
+// Small inline turn arrow rendered next to distance text
+static void drawMiniTurnIcon(int cx, int cy, const char* direction) {
+  int sz = 10; // Icon half-size
 
   if (strcmp(direction, "R") == 0) {
-    // Right turn arrow
-    gfx->fillTriangle(cx + arrowSize, cy, cx, cy - 20, cx, cy + 20, NAV_ARROW);
-    gfx->fillRect(cx - arrowSize, cy - 6, arrowSize, 12, NAV_ARROW);
-    gfx->fillRect(cx - 6, cy - arrowSize, 12, arrowSize, NAV_ARROW);
+    // Right arrow: horizontal bar + right-pointing head
+    gfx->fillRect(cx - sz, cy - 2, sz, 4, NAV_ARROW);
+    gfx->fillTriangle(cx + sz, cy, cx + 2, cy - 7, cx + 2, cy + 7, NAV_ARROW);
+    // Vertical stem (turn from straight)
+    gfx->fillRect(cx - sz, cy - sz, 4, sz, NAV_ARROW);
   }
   else if (strcmp(direction, "L") == 0) {
-    // Left turn arrow
-    gfx->fillTriangle(cx - arrowSize, cy, cx, cy - 20, cx, cy + 20, NAV_ARROW);
-    gfx->fillRect(cx, cy - 6, arrowSize, 12, NAV_ARROW);
-    gfx->fillRect(cx - 6, cy - arrowSize, 12, arrowSize, NAV_ARROW);
+    // Left arrow
+    gfx->fillRect(cx, cy - 2, sz, 4, NAV_ARROW);
+    gfx->fillTriangle(cx - sz, cy, cx - 2, cy - 7, cx - 2, cy + 7, NAV_ARROW);
+    // Vertical stem
+    gfx->fillRect(cx + sz - 4, cy - sz, 4, sz, NAV_ARROW);
   }
   else if (strcmp(direction, "U") == 0) {
-    // U-turn arrow
-    gfx->fillTriangle(cx - 30, cy + 10, cx - 10, cy + 10, cx - 20, cy + arrowSize, NAV_ARROW);
-    gfx->drawArc(cx, cy - 10, 25, 20, 0, 180, NAV_ARROW);
+    // U-turn: small arc with downward arrow
+    gfx->drawArc(cx, cy - 4, 9, 6, 0.0f, 180.0f, NAV_ARROW);
+    gfx->fillTriangle(cx + 9, cy + 4, cx + 5, cy - 2, cx + 13, cy - 2, NAV_ARROW);
   }
   else {
-    // Straight arrow (default)
-    gfx->fillTriangle(cx, cy - arrowSize, cx - 20, cy, cx + 20, cy, NAV_ARROW);
-    gfx->fillRect(cx - 6, cy, 12, arrowSize, NAV_ARROW);
+    // Straight: upward arrow
+    gfx->fillRect(cx - 2, cy - sz, 4, sz * 2, NAV_ARROW);
+    gfx->fillTriangle(cx, cy - sz - 5, cx - 6, cy - sz + 2, cx + 6, cy - sz + 2, NAV_ARROW);
   }
 }
 
-// ===== Draw Breadcrumb Path =====
-// Renders the route path segment using offset data
-void drawBreadcrumbPath(NavChunk* chunk) {
-  int startX = 260;
-  int startY = 200;
-  int prevX = startX;
-  int prevY = startY;
+// ===== Draw Distance + Turn (Bottom Center) =====
+static void drawDistanceAndTurn(NavChunk* chunk) {
+  int distY = 200; // Y position for distance text
+  int turnIconX = NAV_CX - 55; // Turn icon to the left of distance
+  int turnIconY = distY + 8;
 
-  // Draw path from offsets
-  for (int i = 0; i < chunk->pathPointCount && i < 10; i++) {
-    int px = startX + chunk->pathOffsets[i * 2] * 2;
-    int py = startY + chunk->pathOffsets[i * 2 + 1] * 2;
+  // Draw mini turn icon
+  drawMiniTurnIcon(turnIconX, turnIconY, chunk->direction);
 
-    // Draw path segment
-    gfx->drawLine(prevX, prevY, px, py, NAV_PATH);
-    gfx->drawLine(prevX + 1, prevY, px + 1, py, NAV_PATH);
+  // Distance number (large bold)
+  gfx->setTextSize(3);
+  gfx->setTextColor(NAV_TEXT);
 
-    // Draw dot at waypoint
-    gfx->fillCircle(px, py, 2, NAV_ACCENT);
+  char distBuf[8];
+  char unitBuf[4];
 
-    prevX = px;
-    prevY = py;
+  if (chunk->distanceMeters >= 1000) {
+    float km = chunk->distanceMeters / 1000.0f;
+    if (km >= 10.0f) {
+      snprintf(distBuf, sizeof(distBuf), "%d", (int)km);
+    } else {
+      // One decimal for < 10 km
+      int whole = (int)km;
+      int frac = (int)((km - whole) * 10);
+      snprintf(distBuf, sizeof(distBuf), "%d.%d", whole, frac);
+    }
+    strcpy(unitBuf, "km");
+  } else {
+    snprintf(distBuf, sizeof(distBuf), "%d", chunk->distanceMeters);
+    strcpy(unitBuf, "m");
   }
 
-  // Draw current position indicator
-  gfx->fillCircle(startX, startY, 5, NAV_ACCENT);
-  gfx->drawCircle(startX, startY, 7, NAV_DIM);
+  // Calculate text width for centering (approx 18px per char at size 3)
+  int distLen = strlen(distBuf);
+  int textW = distLen * 18;
+  int distX = NAV_CX - textW / 2 + 10; // Slightly right to account for turn icon
+
+  gfx->setCursor(distX, distY);
+  gfx->print(distBuf);
+
+  // Unit text (smaller, positioned right after the number)
+  gfx->setTextSize(2);
+  gfx->setTextColor(NAV_DIM);
+  gfx->setCursor(distX + textW + 4, distY + 6);
+  gfx->print(unitBuf);
 }
 
-// ===== Draw Navigation Screen =====
+// ===== Draw Curved Progress Arc =====
+// Thin arc at the bottom showing distance progress to next turn
+static void drawProgressArc(NavChunk* chunk) {
+  int arcCX = NAV_CX;
+  int arcCY = 260; // Center below screen — only the top of arc is visible
+  int arcR_outer = 38;
+  int arcR_inner = 34;
+
+  // Calculate progress (chunk index / total chunks)
+  float progress = 0.0f;
+  if (chunk->totalChunks > 0) {
+    progress = (float)(chunk->chunkIndex) / (float)(chunk->totalChunks);
+  }
+  if (progress > 1.0f) progress = 1.0f;
+
+  // Arc spans from 200 to 340 degrees (a wide bottom arc visible on screen)
+  float arcStart = 210.0f;
+  float arcEnd = 330.0f;
+  float arcSpan = arcEnd - arcStart;
+
+  // Background arc (full span, dim)
+  gfx->drawArc(arcCX, arcCY, arcR_outer, arcR_inner, arcStart, arcEnd, NAV_DIM);
+
+  // Foreground arc (progress-filled, white)
+  if (progress > 0.01f) {
+    float fillEnd = arcStart + arcSpan * progress;
+    gfx->drawArc(arcCX, arcCY, arcR_outer, arcR_inner, arcStart, fillEnd, NAV_ARROW);
+  }
+}
+
+// ===== Draw Navigation Screen (Main Render) =====
 void drawNavScreen(NavChunk* chunk) {
-  // Full black background
+  // Clean full black canvas
   gfx->fillScreen(NAV_BG);
 
-  // --- Top bar: chunk progress ---
-  gfx->setTextSize(1);
-  gfx->setTextColor(NAV_DIM);
-  gfx->setCursor(8, 6);
-  gfx->printf("STEP %d/%d", chunk->chunkIndex + 1, chunk->totalChunks);
-
-  // TRIPPER branding top-right
-  gfx->setTextColor(NAV_ACCENT);
-  gfx->setCursor(250, 6);
-  gfx->print("TRIPPER");
-
-  // Divider line
-  gfx->drawFastHLine(0, 18, SCREEN_W, NAV_DIM);
-
-  // --- Turn direction arrow (left area) ---
-  drawTurnArrow(80, 90, chunk->direction);
-
-  // --- Distance to next instruction ---
-  gfx->setTextSize(3);
-  gfx->setTextColor(NAV_DISTANCE);
-  gfx->setCursor(20, 155);
-  if (chunk->distanceMeters >= 1000) {
-    gfx->printf("%.1f", chunk->distanceMeters / 1000.0f);
-    gfx->setTextSize(2);
-    gfx->print(" km");
-  } else {
-    gfx->printf("%d", chunk->distanceMeters);
-    gfx->setTextSize(2);
-    gfx->print(" m");
-  }
-
-  // --- Instruction text ---
-  gfx->setTextSize(2);
-  gfx->setTextColor(NAV_TEXT);
-  gfx->setCursor(20, 195);
-  gfx->print(chunk->instruction);
-
-  // --- Bearing indicator ---
-  gfx->setTextSize(1);
-  gfx->setTextColor(NAV_DIM);
-  gfx->setCursor(20, 225);
-  gfx->printf("BRG %d", chunk->bearing);
-  gfx->print("\xF8"); // degree symbol
-
-  // --- Breadcrumb path (right side) ---
+  // 1. Perspective breadcrumb path (the core visual)
   drawBreadcrumbPath(chunk);
 
-  // --- Bottom bar ---
-  gfx->drawFastHLine(0, SCREEN_H - 16, SCREEN_W, NAV_DIM);
-  gfx->setTextSize(1);
-  gfx->setTextColor(NAV_ACCENT);
-  gfx->setCursor(8, SCREEN_H - 12);
-  gfx->print("NAVIGATING");
+  // 2. Position chevron at bottom-center of path
+  drawPositionChevron(NAV_CX, NAV_PATH_BOT_Y + 5);
 
-  if (chunk->isLast) {
-    gfx->setTextColor(0x2F06); // Green
-    gfx->setCursor(200, SCREEN_H - 12);
-    gfx->print("ARRIVING SOON");
-  }
+  // 3. Distance + turn direction (bottom center)
+  drawDistanceAndTurn(chunk);
+
+  // 4. Progress arc (very bottom)
+  drawProgressArc(chunk);
 }
 
 // ===== Draw Navigation Complete Screen =====
 void drawNavComplete() {
   gfx->fillScreen(NAV_BG);
 
+  // Checkmark
+  int cx = NAV_CX;
+  int cy = 90;
+  gfx->drawLine(cx - 18, cy, cx - 5, cy + 14, COL_GREEN);
+  gfx->drawLine(cx - 17, cy, cx - 4, cy + 14, COL_GREEN);
+  gfx->drawLine(cx - 5, cy + 14, cx + 20, cy - 10, COL_GREEN);
+  gfx->drawLine(cx - 4, cy + 14, cx + 21, cy - 10, COL_GREEN);
+
   gfx->setTextSize(2);
-  gfx->setTextColor(0x2F06); // Green
-  gfx->setCursor(60, 80);
+  gfx->setTextColor(COL_GREEN);
+  gfx->setCursor(cx - 66, 120);
   gfx->print("DESTINATION");
-  gfx->setCursor(80, 110);
+  gfx->setCursor(cx - 48, 145);
   gfx->print("REACHED");
 
   gfx->setTextSize(1);
   gfx->setTextColor(NAV_DIM);
-  gfx->setCursor(60, 160);
+  gfx->setCursor(cx - 60, 185);
   gfx->print("Returning to dashboard...");
-
-  gfx->setTextColor(NAV_ACCENT);
-  gfx->setCursor(120, 200);
-  gfx->print("TRIPPER");
 }
 
 // ===== Enter Navigation Mode =====
@@ -181,16 +304,16 @@ void enterNavMode() {
   navDisplayActive = true;
   gfx->fillScreen(NAV_BG);
 
-  // Waiting for first chunk
+  // Minimal waiting state
   gfx->setTextSize(2);
   gfx->setTextColor(NAV_TEXT);
-  gfx->setCursor(60, 100);
-  gfx->print("Starting nav...");
+  gfx->setCursor(NAV_CX - 72, 105);
+  gfx->print("Starting...");
 
   gfx->setTextSize(1);
   gfx->setTextColor(NAV_DIM);
-  gfx->setCursor(60, 140);
-  gfx->print("Waiting for route data");
+  gfx->setCursor(NAV_CX - 66, 140);
+  gfx->print("Waiting for route");
 }
 
 // ===== Exit Navigation Mode =====
@@ -221,7 +344,7 @@ bool navDisplayLoop() {
     }
   }
   else if (state == NAV_COMPLETE) {
-    if (now - lastNavRender > 500) { // Small delay before showing complete
+    if (now - lastNavRender > 500) {
       drawNavComplete();
       lastNavRender = now;
 
@@ -231,7 +354,7 @@ bool navDisplayLoop() {
       if (now - completeTime > 3000) {
         completeTime = 0;
         exitNavMode();
-        return false; // Signal to return to dashboard
+        return false;
       }
     }
   }
@@ -241,7 +364,7 @@ bool navDisplayLoop() {
     return false;
   }
 
-  return true; // Still in nav mode
+  return true;
 }
 
 #endif // NAV_DISPLAY_H
