@@ -13,6 +13,7 @@ import http from 'http';
 import { DeviceManager } from './modules/deviceManager.js';
 import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
+import { renderChunkToScreen } from './modules/pathRenderer.js';
 
 const PORT = 3001;
 
@@ -101,13 +102,10 @@ function handleChunkRequest(ws, deviceId, chunkIndex) {
   }
 
   const chunk = session.chunks[chunkIndex];
-  sendToDevice(ws, {
-    type: 'NAV_CHUNK',
-    ...chunk,
-    chunkIndex,
-    totalChunks: session.chunks.length,
-    isLast: chunkIndex === session.chunks.length - 1
-  });
+
+  // Render smooth path coordinates for the ESP32 display
+  const renderedPayload = renderChunkToScreen(chunk, chunkIndex, session.chunks.length);
+  sendToDevice(ws, renderedPayload);
 }
 
 function sendToDevice(ws, msg) {

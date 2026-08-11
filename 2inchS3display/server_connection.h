@@ -38,6 +38,21 @@ enum NavState {
 };
 
 // ===== Navigation Chunk Data =====
+// Pre-rendered screen coordinates from server (320x240 canvas)
+#define MAX_MAIN_PATH_POINTS  64
+#define MAX_SIDE_PATHS        3
+#define MAX_SIDE_PATH_POINTS  12
+
+struct PathPoint {
+  int16_t x;
+  int16_t y;
+};
+
+struct SidePath {
+  PathPoint points[MAX_SIDE_PATH_POINTS];
+  uint8_t count;
+};
+
 struct NavChunk {
   uint8_t chunkIndex;
   uint8_t totalChunks;
@@ -45,9 +60,12 @@ struct NavChunk {
   char direction[4];        // "R", "L", "S", "U" (right, left, straight, u-turn)
   uint16_t distanceMeters;  // distance to next instruction
   int16_t bearing;          // 0-359 degrees
-  // Breadcrumb path points (simplified polyline segment)
-  int8_t pathOffsets[20];   // relative x,y offsets for breadcrumb rendering (10 points)
-  uint8_t pathPointCount;
+  // Server-rendered smooth path (screen coordinates)
+  PathPoint mainPath[MAX_MAIN_PATH_POINTS];
+  uint8_t mainPathCount;
+  // Side roads (wrong-turn indicators)
+  SidePath sidePaths[MAX_SIDE_PATHS];
+  uint8_t sidePathCount;
   bool isLast;
 };
 
@@ -140,7 +158,7 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     requestNextChunk(0);
   }
 
-  // --- NAV_CHUNK: navigation data chunk ---
+  // --- NAV_CHUNK: navigation data chunk (server-rendered paths) ---
   else if (strcmp(msgType, "NAV_CHUNK") == 0) {
     currentChunk.chunkIndex = doc["chunkIndex"] | 0;
     currentChunk.totalChunks = doc["totalChunks"] | 1;
@@ -150,20 +168,45 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     currentChunk.bearing = doc["bearing"] | 0;
     currentChunk.isLast = doc["isLast"] | false;
 
-    // Parse path offsets
-    JsonArray path = doc["path"].as<JsonArray>();
-    currentChunk.pathPointCount = 0;
-    if (path) {
-      for (size_t i = 0; i < path.size() && i < 20; i++) {
-        currentChunk.pathOffsets[i] = path[i].as<int8_t>();
-        currentChunk.pathPointCount++;
+    // Parse mainPath: array of [x, y] screen coordinates
+    JsonArray mainPath = doc["mainPath"].as<JsonArray>();
+    currentChunk.mainPathCount = 0;
+    if (mainPath) {
+      for (size_t i = 0; i < mainPath.size() && i < MAX_MAIN_PATH_POINTS; i++) {
+        JsonArray pt = mainPath[i].as<JsonArray>();
+        if (pt && pt.size() >= 2) {
+          currentChunk.mainPath[i].x = pt[0].as<int16_t>();
+          currentChunk.mainPath[i].y = pt[1].as<int16_t>();
+          currentChunk.mainPathCount++;
+        }
       }
     }
-    currentChunk.pathPointCount /= 2; // pairs of x,y
+
+    // Parse sidePaths: array of arrays of [x, y]
+    JsonArray sidePaths = doc["sidePaths"].as<JsonArray>();
+    currentChunk.sidePathCount = 0;
+    if (sidePaths) {
+      for (size_t s = 0; s < sidePaths.size() && s < MAX_SIDE_PATHS; s++) {
+        JsonArray sp = sidePaths[s].as<JsonArray>();
+        currentChunk.sidePaths[s].count = 0;
+        if (sp) {
+          for (size_t p = 0; p < sp.size() && p < MAX_SIDE_PATH_POINTS; p++) {
+            JsonArray pt = sp[p].as<JsonArray>();
+            if (pt && pt.size() >= 2) {
+              currentChunk.sidePaths[s].points[p].x = pt[0].as<int16_t>();
+              currentChunk.sidePaths[s].points[p].y = pt[1].as<int16_t>();
+              currentChunk.sidePaths[s].count++;
+            }
+          }
+        }
+        currentChunk.sidePathCount++;
+      }
+    }
 
     hasNewChunk = true;
-    Serial.printf("[NAV] Received chunk %d/%d: %s\n",
-      currentChunk.chunkIndex + 1, currentChunk.totalChunks, currentChunk.instruction);
+    Serial.printf("[NAV] Received chunk %d/%d: %s (%d path pts, %d side roads)\n",
+      currentChunk.chunkIndex + 1, currentChunk.totalChunks,
+      currentChunk.instruction, currentChunk.mainPathCount, currentChunk.sidePathCount);
   }
 
   // --- STOP_NAVIGATION command ---
