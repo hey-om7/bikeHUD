@@ -65,14 +65,16 @@ void drawStaticUI() {
   gfx->print("SOS");
   gfx->setTextSize(1);
 
-  // PAIRED capsule
+  // SERVER capsule (green when WebSocket connected, blue when WiFi paired, gray otherwise)
   int cap2X = startX + capW + gap;
-  uint16_t pairedBg = hotspotConnected ? COL_BLUE : COL_GRAY_DIM;
-  gfx->fillRoundRect(cap2X, capY, capW, capH, 4, pairedBg);
-  gfx->setTextColor(hotspotConnected ? COL_BLACK : COL_GRAY_MID);
+  bool serverConnected = (getServerState() == SRV_CONNECTED);
+  uint16_t cap2Bg = serverConnected ? COL_GREEN : (hotspotConnected ? COL_BLUE : COL_GRAY_DIM);
+  uint16_t cap2Txt = (serverConnected || hotspotConnected) ? COL_BLACK : COL_GRAY_MID;
+  gfx->fillRoundRect(cap2X, capY, capW, capH, 4, cap2Bg);
+  gfx->setTextColor(cap2Txt);
   gfx->setTextSize(2);
-  gfx->setCursor(cap2X + 11, capY + 2);
-  gfx->print("PAIRED");
+  gfx->setCursor(cap2X + 7, capY + 2);
+  gfx->print(serverConnected ? "SERVER" : "PAIRED");
   gfx->setTextSize(1);
 
   // GPS capsule - circles
@@ -229,12 +231,13 @@ void updateHeaderBar() {
   gfx->setTextSize(1);
 
   int cap2X = startX + capW + gap;
-  uint16_t pairedBg = hotspotConnected ? COL_BLUE : COL_GRAY_DIM;
+  bool serverConnected = (getServerState() == SRV_CONNECTED);
+  uint16_t pairedBg = serverConnected ? COL_GREEN : (hotspotConnected ? COL_BLUE : COL_GRAY_DIM);
   gfx->fillRoundRect(cap2X, capY, capW, capH, 4, pairedBg);
-  gfx->setTextColor(hotspotConnected ? COL_BLACK : COL_GRAY_MID);
+  gfx->setTextColor((serverConnected || hotspotConnected) ? COL_BLACK : COL_GRAY_MID);
   gfx->setTextSize(2);
-  gfx->setCursor(cap2X + 11, capY + 2);
-  gfx->print("PAIRED");
+  gfx->setCursor(cap2X + 7, capY + 2);
+  gfx->print(serverConnected ? "SERVER" : "PAIRED");
   gfx->setTextSize(1);
 
   int cap3X = cap2X + capW + gap;

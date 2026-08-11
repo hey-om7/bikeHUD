@@ -17,8 +17,8 @@
 #include "sensors.h"
 #include "wifi_provision.h"
 #include "ui_screens.h"
-#include "dashboard.h"
 #include "server_connection.h"
+#include "dashboard.h"
 #include "nav_display.h"
 
 // ===== Display Setup =====
@@ -59,6 +59,8 @@ AppState appState = STATE_SPLASH;
 unsigned long stateStartTime = 0;
 unsigned long lastWifiRetry = 0;
 bool portalScreenShown = false;
+bool splashAPStarted = false;
+int lastProgressDrawn = -1;
 
 // ===== Setup =====
 void setup() {
@@ -92,9 +94,68 @@ void loop() {
 
   switch (appState) {
 
-    // --- SPLASH: Show bike image for 3 seconds ---
-    case STATE_SPLASH:
-      if (now - stateStartTime >= 3000) {
+    // --- SPLASH: Show bike image for 10 seconds with reset window ---
+    // During splash, a hidden AP is active. If any device connects → factory reset.
+    // This provides a way to reset WiFi credentials without a button.
+    case STATE_SPLASH: {
+      // Start the AP on first splash frame
+      if (!splashAPStarted) {
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(AP_SSID, AP_PASS);
+        splashAPStarted = true;
+        delay(50);
+      }
+
+      unsigned long elapsed = now - stateStartTime;
+
+      // Draw progress bar (updates every ~3% to avoid flicker)
+      int progress = (elapsed * 100) / 15000;  // 0-100 over 15 seconds
+      if (progress > 100) progress = 100;
+      if (progress != lastProgressDrawn) {
+        int barX = 40;
+        int barY = 224;
+        int barW = 240;
+        int barH = 6;
+        int barR = 3;
+        int fillW = (barW * progress) / 100;
+
+        // Bar background
+        gfx->fillRoundRect(barX, barY, barW, barH, barR, 0x3186);
+        // Bar fill (orange accent)
+        if (fillW > 0) {
+          gfx->fillRoundRect(barX, barY, fillW, barH, barR, COL_ORANGE);
+        }
+        lastProgressDrawn = progress;
+      }
+
+      // Check if any device connected to our AP → RESET
+      if (WiFi.softAPgetStationNum() > 0) {
+        // Someone connected! Erase everything and restart.
+        gfx->fillRect(0, 200, SCREEN_W, 40, 0x0000);
+        gfx->setTextSize(2);
+        gfx->setTextColor(COL_RED);
+        gfx->setCursor(50, 206);
+        gfx->print("RESETTING...");
+
+        // Erase stored WiFi credentials
+        clearCredentials();
+
+        // Stop AP
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_OFF);
+
+        delay(1500);
+        ESP.restart();
+        return; // Never reached
+      }
+
+      // After 15 seconds, stop AP and proceed normally
+      if (elapsed >= 15000) {
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_OFF);
+        splashAPStarted = false;
+        delay(50);
+
         if (hasStoredCredentials()) {
           showReconnectingScreen();
           appState = STATE_RECONNECTING;
@@ -108,6 +169,7 @@ void loop() {
         }
       }
       break;
+    }
 
     // --- RECONNECTING: Try stored credentials at boot ---
     case STATE_RECONNECTING:
