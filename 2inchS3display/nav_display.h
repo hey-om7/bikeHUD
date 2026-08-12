@@ -13,6 +13,7 @@
 #include <math.h>
 #include "config.h"
 #include "server_connection.h"
+#include "nav_arrow.h"
 
 extern Arduino_GFX *gfx;
 
@@ -22,9 +23,7 @@ extern Arduino_GFX *gfx;
 #define NAV_DIM        0x4208   // Gray for side roads and motion lines
 #define NAV_ARROW      0xFFFF   // White chevron
 #define NAV_TEXT       0xFFFF   // White text
-#define NAV_SHADOW     0x2104   // Dark shadow for 3D bevel
-#define NAV_FACET_L    0xC618   // Light gray left facet
-#define NAV_FACET_R    0x8410   // Darker gray right facet
+// (3D shading now baked into nav_arrow.h bitmap)
 #define NAV_ACCENT     0xFDA0   // Orange accent
 
 // Layout
@@ -82,54 +81,27 @@ static void drawSideRoads(NavChunk* chunk) {
   }
 }
 
-// ===== Draw 3D Chevron (Beveled Arrowhead) =====
-// Three overlapping triangles create a 3D beveled look
+// ===== Draw 3D Chevron (Bitmap Arrowhead) =====
+// Renders the pre-rendered 3D arrowhead bitmap centered at (cx, cy)
+// Skips black (0x0000) pixels for transparency against black background
 static void drawChevron3D(int cx, int cy) {
-  // Chevron geometry
-  int tipY = cy - 16;    // Top point
-  int baseY = cy + 10;   // Bottom edge
-  int halfW = 14;        // Half-width at base
-  int midY = cy;         // Middle split point
+  int startX = cx - NAV_ARROW_W / 2;
+  int startY = cy - NAV_ARROW_H / 2;
 
-  // Drop shadow (offset +2, +2)
-  gfx->fillTriangle(
-    cx + 2, tipY + 2,
-    cx - halfW + 2, baseY + 2,
-    cx + halfW + 2, baseY + 2,
-    NAV_SHADOW
-  );
+  for (int y = 0; y < NAV_ARROW_H; y++) {
+    int screenY = startY + y;
+    if (screenY < 0 || screenY >= SCREEN_H) continue;
 
-  // Right facet (darker gray)
-  gfx->fillTriangle(
-    cx, tipY,
-    cx, midY + 2,
-    cx + halfW, baseY,
-    NAV_FACET_R
-  );
+    for (int x = 0; x < NAV_ARROW_W; x++) {
+      int screenX = startX + x;
+      if (screenX < 0 || screenX >= SCREEN_W) continue;
 
-  // Left facet (lighter gray)
-  gfx->fillTriangle(
-    cx, tipY,
-    cx, midY + 2,
-    cx - halfW, baseY,
-    NAV_FACET_L
-  );
-
-  // Center highlight (bright white, smaller)
-  gfx->fillTriangle(
-    cx, tipY + 2,
-    cx - halfW + 5, baseY - 2,
-    cx + halfW - 5, baseY - 2,
-    NAV_ARROW
-  );
-
-  // Inner "V" cutout for chevron shape
-  gfx->fillTriangle(
-    cx, midY + 4,
-    cx - halfW + 5, baseY,
-    cx + halfW - 5, baseY,
-    NAV_BG
-  );
+      uint16_t color = pgm_read_word(&nav_arrow_bitmap[y * NAV_ARROW_W + x]);
+      if (color != 0x0000) {
+        gfx->drawPixel(screenX, screenY, color);
+      }
+    }
+  }
 }
 
 // ===== Draw Minimalist Turn Icon =====
