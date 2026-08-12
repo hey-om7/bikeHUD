@@ -16,6 +16,7 @@
 #include "nav_arrow.h"
 
 extern Arduino_GFX *gfx;
+extern int gpsSatellites;
 
 // Navigation display colors
 #define NAV_BG         0x0000   // Black background
@@ -133,13 +134,15 @@ static void drawMiniTurnIcon(int cx, int cy, const char* direction) {
   }
 }
 
-// ===== Draw Distance + Turn Direction (Bottom Center) =====
+// ===== Draw Distance + Turn Direction (Right Side) =====
 static void drawDistanceAndTurn(NavChunk* chunk) {
-  int distY = 198;
-  int turnIconX = NAV_CX - 60;
-  int turnIconY = distY + 10;
+  // Distance and turn icon positioned on the right side
+  int distX = SCREEN_W - 90;
+  int distY = SCREEN_H / 2 - 20;
+  int turnIconX = distX + 40;
+  int turnIconY = distY - 20;
 
-  // Mini turn icon
+  // Mini turn icon (above distance on right side)
   drawMiniTurnIcon(turnIconX, turnIconY, chunk->direction);
 
   // Distance number (large)
@@ -164,18 +167,18 @@ static void drawDistanceAndTurn(NavChunk* chunk) {
     strcpy(unitBuf, "m");
   }
 
-  // Center the distance text (approx 18px per char at size 3)
+  // Right-align the distance text
   int distLen = strlen(distBuf);
   int textW = distLen * 18;
-  int distX = NAV_CX - textW / 2 + 12;
+  int textX = SCREEN_W - textW - 20;
 
-  gfx->setCursor(distX, distY);
+  gfx->setCursor(textX, distY);
   gfx->print(distBuf);
 
   // Unit (smaller, beside the number)
   gfx->setTextSize(2);
   gfx->setTextColor(NAV_DIM);
-  gfx->setCursor(distX + textW + 4, distY + 6);
+  gfx->setCursor(textX + textW + 4, distY + 6);
   gfx->print(unitBuf);
 }
 
@@ -207,6 +210,25 @@ static void drawProgressArc(NavChunk* chunk) {
   }
 }
 
+// ===== Draw GPS Signal Dots (Top-Right Corner, White) =====
+static void drawNavGPSDots() {
+  int dotR = 3;
+  int dotSpacing = 12;
+  int startX = SCREEN_W - 4 * dotSpacing - 8;
+  int dotY = 12;
+
+  int strength = min(gpsSatellites / 2, 4);  // 0-4 dots filled based on satellites
+
+  for (int i = 0; i < 4; i++) {
+    int cx = startX + i * dotSpacing;
+    if (i < strength) {
+      gfx->fillCircle(cx, dotY, dotR, NAV_TEXT);  // White filled
+    } else {
+      gfx->drawCircle(cx, dotY, dotR, NAV_DIM);   // Gray outline
+    }
+  }
+}
+
 // ===== Draw Navigation Screen (Main Render) =====
 void drawNavScreen(NavChunk* chunk) {
   // 1. Clean full black canvas
@@ -221,10 +243,13 @@ void drawNavScreen(NavChunk* chunk) {
   // 4. Draw 3D chevron at path origin
   drawChevron3D(NAV_CX, NAV_PATH_BOT_Y + 8);
 
-  // 5. Distance + turn icon (bottom center)
+  // 5. Distance + turn icon (right side)
   drawDistanceAndTurn(chunk);
 
-  // 6. Progress arc (very bottom)
+  // 6. GPS signal dots (top-right corner)
+  drawNavGPSDots();
+
+  // 7. Progress arc (very bottom)
   drawProgressArc(chunk);
 }
 

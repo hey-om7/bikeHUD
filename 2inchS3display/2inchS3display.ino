@@ -94,7 +94,7 @@ void loop() {
 
   switch (appState) {
 
-    // --- SPLASH: Show bike image for 10 seconds with reset window ---
+    // --- SPLASH: Show bike image for 3 seconds with reset window ---
     // During splash, a hidden AP is active. If any device connects → factory reset.
     // This provides a way to reset WiFi credentials without a button.
     case STATE_SPLASH: {
@@ -109,7 +109,7 @@ void loop() {
       unsigned long elapsed = now - stateStartTime;
 
       // Draw progress bar (updates every ~3% to avoid flicker)
-      int progress = (elapsed * 100) / 15000;  // 0-100 over 15 seconds
+      int progress = (elapsed * 100) / 3000;  // 0-100 over 3 seconds
       if (progress > 100) progress = 100;
       if (progress != lastProgressDrawn) {
         int barX = 40;
@@ -149,8 +149,8 @@ void loop() {
         return; // Never reached
       }
 
-      // After 15 seconds, stop AP and proceed normally
-      if (elapsed >= 15000) {
+      // After 3 seconds, stop AP and proceed normally
+      if (elapsed >= 3000) {
         WiFi.softAPdisconnect(true);
         WiFi.mode(WIFI_OFF);
         splashAPStarted = false;
