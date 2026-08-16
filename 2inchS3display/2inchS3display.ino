@@ -266,14 +266,13 @@ void loop() {
           
           float currentSpeed = 55.0;
           float currentDist  = 3.5;
-          int   currentTemp  = 24;
           int   currentAqi   = 45;
           int   currentWind  = 12;
           int   currentUv    = 3;
           String currentTime = "00:06:52";
-
+          
           // Pass the values to the updated function signature
-          updateDashboard(currentSpeed, currentDist, currentTemp, currentAqi, 
+          updateDashboard(currentSpeed, currentDist, currentAqi, 
                           currentWind, currentUv, gpsHeading, pitchIncline, currentTime);
           lastDisplayUpdate = now;
         }
