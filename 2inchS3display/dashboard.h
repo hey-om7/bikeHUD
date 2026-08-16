@@ -10,6 +10,7 @@
 #include "sensors.h"     
 #include "Inter_Black_16pt.h"
 #include "Inter_Black12pt.h"
+#include "Inter_Black8pt.h"
 
 extern Arduino_GFX *gfx;
 extern bool hotspotConnected;
@@ -80,6 +81,114 @@ void initDashboard() {
   gfx->setTextColor(TEXT_COLOR, CARD_BG_COLOR); // Using BG color prevents ghosting
 }
 
+void drawTextWithSuffix(
+    const String& firstText,
+    const String& secondText,
+    const GFXfont* firstFont,
+    const GFXfont* secondFont,
+    int16_t x,
+    int16_t y,
+    int16_t gap,
+    bool alignTop
+) {
+    // ---- First text ----
+    gfx->setFont(firstFont);
+    gfx->setTextSize(1);
+    gfx->setTextColor(0x0000);
+
+    int16_t firstX, firstY;
+    uint16_t firstWidth, firstHeight;
+
+    gfx->getTextBounds(
+        firstText,
+        x,
+        y,
+        &firstX,
+        &firstY,
+        &firstWidth,
+        &firstHeight
+    );
+
+    // Draw first text
+    gfx->setCursor(x, y);
+    gfx->print(firstText);
+
+    // ---- Second text ----
+    gfx->setFont(secondFont);
+
+    int16_t secondX = x + firstWidth + gap;
+
+    int16_t secondBoundsX, secondBoundsY;
+    uint16_t secondWidth, secondHeight;
+
+    // Get the suffix bounds using the same baseline first
+    gfx->getTextBounds(
+        secondText,
+        secondX,
+        y,
+        &secondBoundsX,
+        &secondBoundsY,
+        &secondWidth,
+        &secondHeight
+    );
+
+    int16_t secondY = y;
+
+    if (alignTop) {
+        // Align the TOP of both texts
+        secondY = y + (firstY - secondBoundsY);
+    } else {
+        // Align the BOTTOM of both texts
+        secondY = y + 
+                  ((firstY + firstHeight) -
+                   (secondBoundsY + secondHeight));
+    }
+
+    gfx->setCursor(secondX, secondY);
+    gfx->print(secondText);
+}
+
+void drawText(
+    const String& text,
+    int16_t x,
+    int16_t y,
+    const GFXfont* font
+) {
+    // Set font
+    gfx->setFont(font);
+    gfx->setTextSize(1);
+
+    // Always black text
+    gfx->setTextColor(0x0000);
+
+    // Get the exact bounding box of the text
+    int16_t x1, y1;
+    uint16_t width, height;
+
+    gfx->getTextBounds(
+        text,
+        x,
+        y,
+        &x1,
+        &y1,
+        &width,
+        &height
+    );
+
+    // Clear only the area occupied by the text
+    gfx->fillRect(
+        x1,
+        y1,
+        width,
+        height,
+        0xFFFF
+    );
+
+    // Draw the text
+    gfx->setCursor(x, y);
+    gfx->print(text);
+}
+
 void updateDashboard(float currentSpeed, float currentDist, int currentTemp, 
                      int currentAqi, int currentWind, int currentUv, 
                      float currentHeading, float currentPitch, String currentTime) {
@@ -92,34 +201,68 @@ void updateDashboard(float currentSpeed, float currentDist, int currentTemp,
 
   previousDist = currentDist;
 
-  // Clear the complete widget
+  char distanceText[16];
 
-  // gfx->fillRect(10, 5, 100, 30, 0xFFFF);
+snprintf(distanceText, sizeof(distanceText), "%.1f", currentDist);
 
-  // ---- Distance value ----
+drawTextWithSuffix(
+    distanceText,
+    "km",
+    &Inter_Black_16pt,
+    &Inter_Black8pt,
+    5,     // X
+    50,     // Y / baseline
+    10,      // gap
+    true
+);
 
-  gfx->setFont(&Inter_Black_16pt);
 
-  gfx->setTextSize(1);
+drawText(
+    currentTime,
+    5,
+    230,
+    &Inter_Black_16pt
+);
 
-  gfx->setTextColor(0x0000);
+drawText(
+    String(255),
+    250,
+    60,
+    &Inter_Black_16pt
+);
 
-  gfx->setCursor(10, 50);
+drawText(
+    String(25),
+    270,
+    120,
+    &Inter_Black_16pt
+);
 
-  gfx->print(currentDist, 1);
+drawTextWithSuffix(
+    String(39),
+    "o",
+    &Inter_Black_16pt,
+    &Inter_Black8pt,
+    260,     // X
+    175,     // Y / baseline
+    3,      // gap
+    true
+);
 
-  // ---- "km" ----
+drawTextWithSuffix(
+    String(2334),
+    "m",
+    &Inter_Black_16pt,
+    &Inter_Black8pt,
+    210,     // X
+    230,     // Y / baseline
+    3,      // gap
+    false
+);
 
-  gfx->setFont(&Inter_Black_12pt);
-
-  gfx->setTextSize(1);
-
-  // Position this depending on how your 18pt font looks
-
-  gfx->setCursor(60, 50);
-
-  gfx->print("km");
 
 }
+
+
 
 #endif // DASHBOARD_H
