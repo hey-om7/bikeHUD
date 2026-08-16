@@ -265,7 +265,14 @@ void loop() {
           DashboardData data;
 
           // --- Live values ---
-          data.temp      = (int) temperatureRead();  // ESP32 internal temp (deg C)
+          // Temperature: read only every 10 seconds to avoid rapid flickering
+          static int cachedTemp = (int) temperatureRead();
+          static unsigned long lastTempRead = 0;
+          if (now - lastTempRead >= 10000) {
+            cachedTemp = (int) temperatureRead();
+            lastTempRead = now;
+          }
+          data.temp      = cachedTemp;
           data.timeOnSec = now / 1000;               // stopwatch since boot
           data.heading   = gpsHeading;
           data.pitch     = pitchIncline;
