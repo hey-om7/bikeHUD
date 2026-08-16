@@ -31,6 +31,7 @@ Arduino_GFX *gfx = new Arduino_ST7789(
 
 // ===== Global State =====
 float pitchIncline = 0.0;
+float rollTilt = 0.0;
 float gpsAltitude = 1060.0;
 float gpsHeading = 0.0;
 int   gpsSatellites = 8;
@@ -67,6 +68,7 @@ void setup() {
   Serial.begin(115200);
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
   Wire.begin(I2C_SDA, I2C_SCL, 400000);
+  Serial.printf("[I2C] Bus on SDA=%d, SCL=%d\n", I2C_SDA, I2C_SCL);
 
   pinMode(LCD_BL, OUTPUT);
   digitalWrite(LCD_BL, HIGH);
@@ -83,6 +85,7 @@ void setup() {
 void goToDashboard() {
   hotspotConnected = true;
   imuConnected = qmi8658_init();
+  lastIMURead = millis();  // Prevent huge dt on first imu_update call
   initDashboard();
   appState = STATE_DASHBOARD;
   stateStartTime = millis();
@@ -216,12 +219,10 @@ void loop() {
         parseNMEA(gpsSerial.readStringUntil('\n'));
       }
 
-      // Read IMU at 50Hz
+      // Read IMU at 50Hz (gyro + accel complementary filter)
       if (imuConnected && (now - lastIMURead >= 20)) {
-        float ax, ay, az;
-        qmi8658_read_accel(&ax, &ay, &az);
-        float rawPitch = atan2f(ay, sqrtf(ax * ax + az * az)) * RAD2DEG;
-        pitchIncline = (pitchIncline * 0.85f) + (rawPitch * 0.15f);
+        float dt = (now - lastIMURead) / 1000.0f;
+        imu_update(dt);
         lastIMURead = now;
       }
 
@@ -256,9 +257,24 @@ void loop() {
         // Server just started navigation - switch to nav display
         enterNavMode();
       } else {
-        // Normal dashboard display at 10Hz
-        if (now - lastDisplayUpdate >= 100) {
-          updateDashboard();
+        // Normal dashboard display at ~30fps
+        if (now - lastDisplayUpdate >= 33) {
+
+          // --- PLACEHOLDER VALUES ---
+          // Replace these with your actual dynamic variables from sensors.h
+          // or server updates once they are fully integrated.
+          
+          float currentSpeed = 55.0;
+          float currentDist  = 3.5;
+          int   currentTemp  = 24;
+          int   currentAqi   = 45;
+          int   currentWind  = 12;
+          int   currentUv    = 3;
+          String currentTime = "00:06:52";
+
+          // Pass the values to the updated function signature
+          updateDashboard(currentSpeed, currentDist, currentTemp, currentAqi, 
+                          currentWind, currentUv, gpsHeading, pitchIncline, currentTime);
           lastDisplayUpdate = now;
         }
       }

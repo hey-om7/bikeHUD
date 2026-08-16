@@ -40,7 +40,7 @@ enum NavState {
 // ===== Navigation Chunk Data =====
 // Pre-rendered screen coordinates from server (320x240 canvas)
 #define MAX_MAIN_PATH_POINTS  64
-#define MAX_SIDE_PATHS        3
+#define MAX_SIDE_PATHS        10
 #define MAX_SIDE_PATH_POINTS  12
 
 struct PathPoint {

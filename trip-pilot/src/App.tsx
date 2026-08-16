@@ -218,6 +218,15 @@ function App() {
       if (res.ok && data.success) {
         setNavigating(true)
         setNavSummary(data.summary)
+
+        // Open ESP preview in a new tab so user can monitor the route visually
+        const previewParams = new URLSearchParams({
+          api: API_BASE,
+          device: DEVICE_ID,
+          destLat: String(destLat),
+          destLng: String(destLng),
+        })
+        window.open(`/esp-preview.html?${previewParams.toString()}`, '_blank')
       } else {
         setError(data.error || 'Failed to start navigation')
       }

@@ -13,7 +13,6 @@ import http from 'http';
 import { DeviceManager } from './modules/deviceManager.js';
 import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
-import { renderChunkToScreen } from './modules/pathRenderer.js';
 
 const PORT = 3001;
 
@@ -103,9 +102,14 @@ function handleChunkRequest(ws, deviceId, chunkIndex) {
 
   const chunk = session.chunks[chunkIndex];
 
-  // Render smooth path coordinates for the ESP32 display
-  const renderedPayload = renderChunkToScreen(chunk, chunkIndex, session.chunks.length);
-  sendToDevice(ws, renderedPayload);
+  // Each chunk is already a fully-rendered NAV_CHUNK frame (see frameRenderer).
+  // Re-stamp index metadata defensively in case the session was re-chunked.
+  sendToDevice(ws, {
+    ...chunk,
+    chunkIndex,
+    totalChunks: session.chunks.length,
+    isLast: chunkIndex === session.chunks.length - 1
+  });
 }
 
 function sendToDevice(ws, msg) {

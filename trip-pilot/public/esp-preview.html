@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ESP Navigation Preview - Tripper</title>
+<style>
+  :root { --bg:#0d0f12; --panel:#181b20; --line:#2a2f36; --txt:#e6e9ee; --dim:#6b727d; --accent:#ffab30; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--txt); min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; padding: 24px 16px; gap: 16px;
+  }
+  h1 { font-size: 16px; font-weight: 600; letter-spacing: .4px; }
+  .sub { color: var(--dim); font-size: 12px; text-align: center; max-width: 600px; line-height: 1.5; }
+  .stage {
+    background: #000; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,.7), 0 0 0 6px #1c1f24, 0 0 0 7px #2c313a;
+  }
+  canvas { display: block; image-rendering: pixelated; width: 640px; height: 480px; }
+  .controls {
+    width: 100%; max-width: 640px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .row { display: flex; align-items: center; gap: 14px; }
+  .row label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; min-width: 64px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); height: 6px; }
+  .val { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--accent); min-width: 80px; text-align: right; }
+  .info { display: flex; justify-content: space-between; }
+  .info span { font-size: 12px; color: var(--dim); }
+  .info .hl { color: var(--txt); font-weight: 500; }
+  .loading { color: var(--dim); font-size: 14px; margin-top: 60px; }
+  .error { color: #f66; font-size: 14px; margin-top: 60px; }
+</style>
+</head>
+<body>
+  <h1>Tripper - ESP Display Preview</h1>
+  <p class="sub">Exact 320x240 representation of the ESP navigation screen. Drag the seekbar to move through the route.</p>
+  <div class="stage"><canvas id="screen" width="320" height="240"></canvas></div>
+  <div class="controls">
+    <div class="row">
+      <label>Progress</label>
+      <input id="seek" type="range" min="0" max="0" step="1" value="0" />
+      <span class="val" id="seekVal">- / -</span>
+    </div>
+    <div class="info">
+      <span>Instruction: <span class="hl" id="instr">-</span></span>
+      <span>Distance: <span class="hl" id="dist">-</span></span>
+      <span>Direction: <span class="hl" id="dir">-</span></span>
+    </div>
+    <div class="info">
+      <span>Route: <span class="hl" id="routeInfo">-</span></span>
+    </div>
+  </div>
+  <div class="loading" id="loadMsg">Loading route data...</div>
+  <div class="error" id="errMsg" style="display:none"></div>
+
+<script>
+// ---- Constants (mirror nav_display.h) ----
+const SCREEN_W = 320, SCREEN_H = 240;
+const NAV_CX = 160, NAV_PATH_BOT_Y = 175, NAV_PATH_TOP_Y = 25;
+const PATH_MAX_THICK = 18, PATH_MIN_THICK = 2;
+const NAV_BG = 0x0000, NAV_PATH_COL = 0xFFFF, NAV_DIM = 0x4208, NAV_SIDE = 0x8410;
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+
+// ---- RGB565 helpers ----
+function rgb565ToCss(v) {
+  const r = (v >> 11) & 0x1F, g = (v >> 5) & 0x3F, b = v & 0x1F;
+  return `rgb(${Math.round(r*255/31)},${Math.round(g*255/63)},${Math.round(b*255/31)})`;
+}
+function navBlend565(c0, c1, f) {
+  if (f <= 0) return c0; if (f >= 1) return c1;
+  const r0=(c0>>11)&0x1F, g0=(c0>>5)&0x3F, b0=c0&0x1F;
+  const r1=(c1>>11)&0x1F, g1=(c1>>5)&0x3F, b1=c1&0x1F;
+  return ((r0+Math.round((r1-r0)*f))<<11)|((g0+Math.round((g1-g0)*f))<<5)|(b0+Math.round((b1-b0)*f));
+}
+function navPathThickness(y) {
+  let t = (NAV_PATH_BOT_Y - y) / (NAV_PATH_BOT_Y - NAV_PATH_TOP_Y);
+  t = Math.max(0, Math.min(1, t));
+  return Math.max(PATH_MIN_THICK, Math.round(PATH_MAX_THICK - t*(PATH_MAX_THICK - PATH_MIN_THICK)));
+}
+
+// ---- Drawing functions (mirror firmware) ----
+function drawSeg(x0,y0,x1,y1,width,col565) {
+  ctx.strokeStyle = rgb565ToCss(col565);
+  ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+}
+
+function drawSideRoads(chunk) {
+  // Mirror nav_display.h drawSideRoads: steady gray surrounding roads with a
+  // gentle near->far depth cue (never fading fully into the background).
+  for (const sp of chunk.sidePaths) {
+    if (sp.length < 2) continue;
+    for (let i = 0; i < sp.length - 1; i++) {
+      const [x0,y0] = sp[i], [x1,y1] = sp[i+1];
+      let t = (NAV_PATH_BOT_Y - (y0+y1)/2) / (NAV_PATH_BOT_Y - NAV_PATH_TOP_Y);
+      t = Math.max(0, Math.min(1, t));
+      const col = navBlend565(0xAD55, 0x630C, t); // near light-gray -> far mid-gray
+      drawSeg(x0,y0,x1,y1, t<0.5?2:1, col);
+    }
+  }
+}
+
+function drawMainPath(chunk) {
+  const mp = chunk.mainPath;
+  if (!mp || mp.length < 2) return;
+  for (let i = 0; i < mp.length - 1; i++) {
+    const [x0,y0] = mp[i], [x1,y1] = mp[i+1];
+    drawSeg(x0,y0,x1,y1, navPathThickness((y0+y1)/2), NAV_PATH_COL);
+  }
+}
+
+function drawChevron(cx, cy) {
+  ctx.fillStyle = rgb565ToCss(NAV_PATH_COL);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy-16); ctx.lineTo(cx+13, cy+6); ctx.lineTo(cx+5, cy+6);
+  ctx.lineTo(cx, cy-2); ctx.lineTo(cx-5, cy+6); ctx.lineTo(cx-13, cy+6);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = rgb565ToCss(0xC618);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy-10); ctx.lineTo(cx+7, cy+4); ctx.lineTo(cx-7, cy+4);
+  ctx.closePath(); ctx.fill();
+}
+
+function drawTurnIcon(cx, cy, dir) {
+  ctx.fillStyle = rgb565ToCss(NAV_PATH_COL);
+  const sz = 10;
+  const rect = (x,y,w,h) => ctx.fillRect(x,y,w,h);
+  const tri = (ax,ay,bx,by,dx,dy) => { ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.lineTo(dx,dy); ctx.closePath(); ctx.fill(); };
+  if (dir === 'R') { rect(cx-1,cy-sz,3,sz); rect(cx-1,cy-1,sz,3); tri(cx+sz+1,cy,cx+sz-4,cy-5,cx+sz-4,cy+5); }
+  else if (dir === 'L') { rect(cx-1,cy-sz,3,sz); rect(cx-sz,cy-1,sz,3); tri(cx-sz-1,cy,cx-sz+4,cy-5,cx-sz+4,cy+5); }
+  else if (dir === 'U') { ctx.strokeStyle=rgb565ToCss(NAV_PATH_COL); ctx.lineWidth=2; ctx.beginPath(); ctx.arc(cx,cy-5,7,Math.PI,2*Math.PI); ctx.stroke(); rect(cx+7,cy-5,3,10); tri(cx+8,cy+7,cx+4,cy+2,cx+12,cy+2); }
+  else { rect(cx-1,cy-sz,3,sz*2); tri(cx,cy-sz-6,cx-5,cy-sz,cx+5,cy-sz); }
+}
+
+function drawDistanceAndTurn(chunk) {
+  const distY = SCREEN_H/2 - 10;
+  let distBuf, unitBuf;
+  if (chunk.distance >= 1000) {
+    const km = chunk.distance/1000;
+    distBuf = km>=10 ? String(Math.floor(km)) : `${Math.floor(km)}.${Math.floor((km-Math.floor(km))*10)}`;
+    unitBuf = 'km';
+  } else { distBuf = String(chunk.distance); unitBuf = 'm'; }
+  const numW = distBuf.length*18, unitW = unitBuf.length*12, gap = 4, rightPad = 18;
+  const blockW = numW+gap+unitW;
+  const numX = SCREEN_W-rightPad-blockW, unitX = numX+numW+gap, blockCX = numX+blockW/2;
+  drawTurnIcon(blockCX, distY-24, chunk.direction);
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = rgb565ToCss(NAV_PATH_COL);
+  ctx.font = '700 26px "Courier New",monospace';
+  ctx.fillText(distBuf, numX, distY-2);
+  ctx.fillStyle = rgb565ToCss(NAV_DIM);
+  ctx.font = '700 17px "Courier New",monospace';
+  ctx.fillText(unitBuf, unitX, distY+8);
+}
+
+function drawProgressArc(chunk) {
+  const cx = NAV_CX, cy = 258, rMid = 34;
+  const deg = d => d*Math.PI/180;
+  let progress = chunk.totalChunks>0 ? chunk.chunkIndex/chunk.totalChunks : 0;
+  progress = Math.min(1, Math.max(0, progress));
+  const start=210, end=330, span=end-start;
+  ctx.lineWidth=4; ctx.lineCap='butt';
+  ctx.strokeStyle = rgb565ToCss(NAV_DIM);
+  ctx.beginPath(); ctx.arc(cx,cy,rMid,deg(start),deg(end)); ctx.stroke();
+  if (progress > 0.01) {
+    ctx.strokeStyle = rgb565ToCss(NAV_PATH_COL);
+    ctx.beginPath(); ctx.arc(cx,cy,rMid,deg(start),deg(start+span*progress)); ctx.stroke();
+  }
+}
+
+function drawGPSDots(sats) {
+  const dotR=3, spacing=12, startX=SCREEN_W-4*spacing-8, dotY=12;
+  const strength = Math.min(Math.floor(sats/2), 4);
+  for (let i=0; i<4; i++) {
+    const cx = startX+i*spacing;
+    ctx.beginPath(); ctx.arc(cx,dotY,dotR,0,2*Math.PI);
+    if (i < strength) { ctx.fillStyle=rgb565ToCss(NAV_PATH_COL); ctx.fill(); }
+    else { ctx.strokeStyle=rgb565ToCss(NAV_DIM); ctx.lineWidth=1; ctx.stroke(); }
+  }
+}
+
+function renderFrame(chunk) {
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,SCREEN_W,SCREEN_H);
+  drawSideRoads(chunk);
+  drawMainPath(chunk);
+  drawChevron(NAV_CX, NAV_PATH_BOT_Y+8);
+  drawDistanceAndTurn(chunk);
+  drawGPSDots(7);
+  drawProgressArc(chunk);
+}
+
+// ---- Load route data and wire seekbar ----
+const params = new URLSearchParams(window.location.search);
+const apiBase = params.get('api') || 'http://localhost:3001';
+const deviceId = params.get('device') || 'tripper-001';
+const destLat = parseFloat(params.get('destLat'));
+const destLng = parseFloat(params.get('destLng'));
+
+let chunks = [];
+
+async function loadRoute() {
+  if (isNaN(destLat) || isNaN(destLng)) {
+    showError('Missing destination coordinates in URL params (destLat, destLng).');
+    return;
+  }
+  try {
+    const res = await fetch(`${apiBase}/api/navigate/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, destLat, destLng })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      showError(data.error || 'Failed to load route');
+      return;
+    }
+    chunks = data.chunks;
+    document.getElementById('loadMsg').style.display = 'none';
+    document.getElementById('routeInfo').textContent =
+      `${data.summary.distance} \u2022 ${data.summary.duration} \u2022 ${chunks.length} chunks`;
+
+    const seek = document.getElementById('seek');
+    seek.max = chunks.length - 1;
+    seek.value = 0;
+    updateFrame(0);
+  } catch (e) {
+    showError('Network error: ' + e.message);
+  }
+}
+
+function updateFrame(index) {
+  if (index < 0 || index >= chunks.length) return;
+  const chunk = chunks[index];
+  renderFrame(chunk);
+  document.getElementById('seekVal').textContent = `${index+1} / ${chunks.length}`;
+  document.getElementById('instr').textContent = chunk.instruction || '-';
+  document.getElementById('dist').textContent = chunk.distance >= 1000
+    ? (chunk.distance/1000).toFixed(1)+' km' : chunk.distance+' m';
+  document.getElementById('dir').textContent =
+    { S:'Straight', R:'Right', L:'Left', U:'U-turn' }[chunk.direction] || chunk.direction;
+}
+
+function showError(msg) {
+  document.getElementById('loadMsg').style.display = 'none';
+  const el = document.getElementById('errMsg');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+document.getElementById('seek').addEventListener('input', e => updateFrame(+e.target.value));
+
+// Keyboard arrow keys for fine scrubbing
+document.addEventListener('keydown', e => {
+  const seek = document.getElementById('seek');
+  if (e.key === 'ArrowRight') { seek.value = Math.min(+seek.value+1, +seek.max); updateFrame(+seek.value); }
+  if (e.key === 'ArrowLeft') { seek.value = Math.max(+seek.value-1, 0); updateFrame(+seek.value); }
+});
+
+loadRoute();
+</script>
+</body>
+</html>

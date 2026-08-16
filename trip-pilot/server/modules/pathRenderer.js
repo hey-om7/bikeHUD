@@ -20,6 +20,14 @@ const PATH_TOP_Y = 25;       // Vanishing point area
 const PATH_BOT_Y = 175;      // Path origin (bottom of path zone)
 const PATH_DENSITY = 5;      // One point every ~5 pixels along the curve
 
+// Firmware buffer limits (must match server_connection.h on the ESP32).
+// The main path is a single continuous polyline; if the smoothed curve produces
+// more vertices than the device can store it is uniformly decimated (endpoints
+// preserved) so the stroke stays continuous instead of being truncated mid-road.
+const MAX_MAIN_PATH_POINTS = 64;
+const MAX_SIDE_PATHS = 3;
+const MAX_SIDE_PATH_POINTS = 12;
+
 /**
  * Evaluate a cubic Bezier at parameter t (0..1)
  */
@@ -93,6 +101,22 @@ function interpolateLinear(a, b) {
       Math.round(a[0] + (b[0] - a[0]) * t),
       Math.round(a[1] + (b[1] - a[1]) * t)
     ]);
+  }
+  return result;
+}
+
+/**
+ * Uniformly decimate a dense polyline down to at most `maxCount` points while
+ * always keeping the first and last vertex. This keeps the line continuous
+ * (the ESP renders it as a connected stroke) even if the Bezier smoothing
+ * produced more points than the device buffer can hold.
+ */
+function capPoints(points, maxCount) {
+  if (points.length <= maxCount) return points;
+  const result = [];
+  const stride = (points.length - 1) / (maxCount - 1);
+  for (let i = 0; i < maxCount; i++) {
+    result.push(points[Math.round(i * stride)]);
   }
   return result;
 }
@@ -176,68 +200,60 @@ function generateWaypoints(chunk) {
 }
 
 /**
- * Generate side road paths (wrong-turn indicators).
- * At a turn point, the "straight continuation" is the wrong way.
+ * Generate side road paths that branch off the main navigation line.
+ *
+ * These are the faint roads that fork away from the route and trail off toward
+ * the horizon in the reference design. Each side road is emitted as a continuous
+ * polyline ordered from ROOT (touching the main path, drawn brightest) to TIP
+ * (deep in the scene, faded into the background by the firmware). Perspective
+ * narrowing is applied so branches pull toward the vanishing point and recede.
+ *
+ * @param {Object} chunk    - Navigation chunk (used to bias branch placement on turns)
+ * @param {Array}  mainPath - Dense main-path polyline in screen coordinates
+ * @returns {Array<Array<[number, number]>>} up to MAX_SIDE_PATHS branch polylines
  */
-function generateSidePaths(chunk, mainWaypoints) {
-  const direction = chunk.direction || 'S';
+function generateSidePaths(chunk) {
   const sidePaths = [];
-
-  // Only generate side roads for actual turns
-  if (direction === 'S') return sidePaths;
-
-  // Find the turn apex (roughly 40-60% up the path)
-  const apexIndex = Math.floor(mainWaypoints.length * 0.4);
-  const apex = mainWaypoints[Math.min(apexIndex, mainWaypoints.length - 1)];
-
-  if (!apex) return sidePaths;
-
-  // The side road continues straight from before the turn
-  const beforeApex = mainWaypoints[Math.max(0, apexIndex - 2)];
-  if (!beforeApex) return sidePaths;
-
-  // Calculate the "straight ahead" direction from the segment before the turn
-  const dx = apex[0] - beforeApex[0];
-  const dy = apex[1] - beforeApex[1];
-  const len = Math.hypot(dx, dy);
-  if (len < 1) return sidePaths;
-
-  const dirX = dx / len;
-  const dirY = dy / len;
-
-  // Generate a short straight continuation (the wrong way)
-  const sideLength = 45; // pixels
-  const sidePoints = [];
-  for (let i = 0; i <= 8; i++) {
-    const t = i / 8;
-    const x = Math.round(apex[0] + dirX * sideLength * t);
-    const y = Math.round(apex[1] + dirY * sideLength * t);
-
-    // Clamp to screen
-    if (x >= 0 && x < SCREEN_W && y >= PATH_TOP_Y && y <= PATH_BOT_Y) {
-      sidePoints.push([x, y]);
-    }
+  
+  // If the routing engine didn't provide real side roads, return empty.
+  // No more guessing!
+  if (!chunk.sidePathsRaw || !Array.isArray(chunk.sidePathsRaw)) {
+    return sidePaths;
   }
 
-  if (sidePoints.length >= 2) {
-    sidePaths.push(sidePoints);
-  }
+  // Process the real side roads provided by your map API
+  const totalHeight = PATH_BOT_Y - PATH_TOP_Y;
 
-  // For U-turns, add a second side road on the opposite side
-  if (direction === 'U' && mainWaypoints.length > 4) {
-    const midIndex = Math.floor(mainWaypoints.length * 0.6);
-    const midPoint = mainWaypoints[midIndex];
-    if (midPoint) {
-      const side2 = [];
-      for (let i = 0; i <= 6; i++) {
-        const t = i / 6;
-        const x = Math.round(midPoint[0] + 35 * t);
-        const y = Math.round(midPoint[1] - 5 * t);
-        if (x >= 0 && x < SCREEN_W && y >= PATH_TOP_Y) {
-          side2.push([x, y]);
-        }
+  for (let b = 0; b < chunk.sidePathsRaw.length && sidePaths.length < MAX_SIDE_PATHS; b++) {
+    const rawBranch = chunk.sidePathsRaw[b]; // Expected format: [x1, y1, x2, y2...]
+    const numPoints = Math.floor(rawBranch.length / 2);
+    const pts = [];
+
+    for (let i = 0; i < numPoints; i++) {
+      const t = (i + 1) / (numPoints + 1);
+      const rawX = rawBranch[i * 2] || 0;
+      const rawY = rawBranch[i * 2 + 1] || 0;
+
+      // Scale offsets to screen space (using the same logic as your main path)
+      const scaledX = CENTER_X + rawX * 3;
+      const scaledY = PATH_BOT_Y - totalHeight * t;
+
+      // Apply perspective to recede toward the vanishing point
+      const [x, y] = applyPerspective(scaledX, scaledY);
+
+      // Bounds checking
+      if (x < 0 || x >= SCREEN_W || y < PATH_TOP_Y - 5 || y > PATH_BOT_Y) continue;
+
+      // Dedupe consecutive identical rounded points
+      if (pts.length === 0 || pts[pts.length - 1][0] !== x || pts[pts.length - 1][1] !== y) {
+        pts.push([x, y]);
       }
-      if (side2.length >= 2) sidePaths.push(side2);
+    }
+
+    // Smooth the real side road, cap it for the ESP buffer, and add it
+    if (pts.length >= 2) {
+      const smoothedSidePath = smoothPath(pts);
+      sidePaths.push(capPoints(smoothedSidePath, MAX_SIDE_PATH_POINTS));
     }
   }
 
@@ -257,11 +273,11 @@ export function renderChunkToScreen(chunk, chunkIndex, totalChunks) {
   // 1. Generate raw waypoints from chunk data
   const waypoints = generateWaypoints(chunk);
 
-  // 2. Smooth the waypoints into a dense Bezier curve
-  const mainPath = smoothPath(waypoints);
+  // 2. Smooth the waypoints into a dense, continuous Bezier polyline
+  const mainPath = capPoints(smoothPath(waypoints), MAX_MAIN_PATH_POINTS);
 
-  // 3. Generate side roads (wrong-turn indicators)
-  const sidePaths = generateSidePaths(chunk, waypoints);
+  // 3. Process REAL side roads from the chunk (no longer requires mainPath as an argument)
+  const sidePaths = generateSidePaths(chunk);
 
   // 4. Build compact payload
   return {

@@ -16,9 +16,9 @@
 #define LCD_RST   -1
 #define LCD_BL     1
 
-// ===== I2C Pins (QMI8658 IMU) =====
-#define I2C_SDA   47
-#define I2C_SCL   48
+// ===== I2C Pins (QMI8658 IMU + CST816D Touch - shared bus) =====
+#define I2C_SDA    48
+#define I2C_SCL    47
 
 // ===== GPS UART Pins (NEO-7M) =====
 #define GPS_RX_PIN 44
@@ -33,6 +33,7 @@
 #define QMI8658_CTRL5     0x06
 #define QMI8658_CTRL7     0x08
 #define QMI8658_AX_L      0x35
+#define QMI8658_GX_L      0x3B
 #define QMI8658_CHIP_ID   0x05
 
 // ===== WiFi Provisioning =====

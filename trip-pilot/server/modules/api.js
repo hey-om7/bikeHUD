@@ -3,6 +3,7 @@
  */
 
 import { Router } from 'express';
+import { buildFrames } from './frameRenderer.js';
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
@@ -141,14 +142,16 @@ export function createApiRouter(deviceManager, navEngine) {
     }
 
     try {
-      // Generate route from device's current position to destination
+      // Generate route geometry from device's current position to destination,
+      // then render it into heading-up, view-culled frames for the device.
       const route = await navEngine.generateRoute(
         device.lat, device.lng,
         destLat, destLng
       );
+      const frames = buildFrames(route);
 
       // Start navigation on the device
-      const started = deviceManager.startNavigation(deviceId, route.chunks);
+      const started = deviceManager.startNavigation(deviceId, frames);
       if (!started) {
         return res.status(500).json({ error: 'Failed to send navigation command to device' });
       }
@@ -156,11 +159,44 @@ export function createApiRouter(deviceManager, navEngine) {
       res.json({
         success: true,
         summary: route.summary,
-        totalChunks: route.chunks.length
+        totalChunks: frames.length
       });
     } catch (e) {
       console.error('[API] Navigation error:', e);
       res.status(500).json({ error: 'Failed to generate route' });
+    }
+  });
+
+  // POST /api/navigate/preview - generate all rendered chunks for the ESP preview
+  // Returns the full set of pre-rendered NAV_CHUNK payloads so the browser
+  // preview can display the exact frames the ESP would see.
+  router.post('/navigate/preview', async (req, res) => {
+    const { deviceId, destLat, destLng } = req.body;
+
+    if (!deviceId || destLat === undefined || destLng === undefined) {
+      return res.status(400).json({ error: 'Missing deviceId, destLat, or destLng' });
+    }
+
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    try {
+      const route = await navEngine.generateRoute(
+        device.lat, device.lng,
+        destLat, destLng
+      );
+      const renderedChunks = buildFrames(route);
+
+      res.json({
+        success: true,
+        summary: route.summary,
+        chunks: renderedChunks
+      });
+    } catch (e) {
+      console.error('[API] Preview generation error:', e);
+      res.status(500).json({ error: 'Failed to generate route preview' });
     }
   });
 
