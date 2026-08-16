@@ -257,23 +257,31 @@ void loop() {
         // Server just started navigation - switch to nav display
         enterNavMode();
       } else {
-        // Normal dashboard display at ~30fps
+        // Normal dashboard display at ~30fps.
+        // Widgets self-skip when unchanged, so calling this every tick is cheap
+        // and each changed value refreshes only its own region.
         if (now - lastDisplayUpdate >= 33) {
 
-          // --- PLACEHOLDER VALUES ---
-          // Replace these with your actual dynamic variables from sensors.h
-          // or server updates once they are fully integrated.
-          
-          float currentSpeed = 55.0;
-          float currentDist  = 3.5;
-          int   currentAqi   = 45;
-          int   currentWind  = 12;
-          int   currentUv    = 3;
-          String currentTime = "00:06:52";
-          
-          // Pass the values to the updated function signature
-          updateDashboard(currentSpeed, currentDist, currentAqi, 
-                          currentWind, currentUv, gpsHeading, pitchIncline, currentTime);
+          DashboardData data;
+
+          // --- Live values ---
+          data.temp      = (int) temperatureRead();  // ESP32 internal temp (deg C)
+          data.timeOnSec = now / 1000;               // stopwatch since boot
+          data.heading   = gpsHeading;
+          data.pitch     = pitchIncline;
+          data.altitude  = gpsAltitude;
+
+          // --- Placeholders (swap for real sources when available) ---
+          data.speed = 55.0f;
+          data.dist  = 3.5f;
+
+          // --- Not wired yet: set these from your API once ready.
+          //     Until then they render as "--".
+          // data.aqi  = fetchedAqi;
+          // data.wind = fetchedWind;
+          // data.uv   = fetchedUv;
+
+          updateDashboard(data);
           lastDisplayUpdate = now;
         }
       }
