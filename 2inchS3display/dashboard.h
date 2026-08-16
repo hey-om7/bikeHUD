@@ -92,7 +92,12 @@ struct ValueWidget {
 // WIDGET INSTANCES (positions tuned for the 320x240 dashboard background)
 // =========================================================================
 static ValueWidget wDist(5,   50,  &Inter_Black_16pt, "km", &Inter_Black8pt, 10, true);
-static ValueWidget wTime(5,   230, &Inter_Black_16pt);
+// Time split into H : M : S so only the changed segment redraws (no blink).
+// Positions follow the font's natural advances (digit=22px, colon=12px) so the
+// split clock looks identical to a single "00:00:00" string with no extra gaps.
+static ValueWidget wTimeH(5,   230, &Inter_Black_16pt);
+static ValueWidget wTimeM(61,  230, &Inter_Black_16pt);
+static ValueWidget wTimeS(117, 230, &Inter_Black_16pt);
 static ValueWidget wAqi (250, 60,  &Inter_Black_16pt);
 static ValueWidget wWind(270, 120, &Inter_Black_16pt);
 static ValueWidget wTemp(260, 175, &Inter_Black_16pt, "o", &Inter_Black8pt, 3, true);
@@ -103,14 +108,6 @@ static ValueWidget wAlt (210, 230, &Inter_Black_16pt, "m", &Inter_Black8pt, 3, f
 // =========================================================================
 // FORMAT HELPERS
 // =========================================================================
-String formatDuration(unsigned long totalSec) {
-  unsigned long h = totalSec / 3600;
-  unsigned long m = (totalSec % 3600) / 60;
-  unsigned long s = totalSec % 60;
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", h, m, s);
-  return String(buf);
-}
 
 // Renders a metric, or "--" while the value is still unavailable (sentinel < 0).
 String formatMetric(int value) {
@@ -221,12 +218,14 @@ void updateValueWidget(ValueWidget &w, const String &text) {
 // is repainted (e.g. returning from navigation mode) so cached "unchanged"
 // values don't leave widgets blank.
 void resetDashboardWidgets() {
-  wDist.drawn = false;
-  wTime.drawn = false;
-  wAqi.drawn  = false;
-  wWind.drawn = false;
-  wTemp.drawn = false;
-  wAlt.drawn  = false;
+  wDist.drawn  = false;
+  wTimeH.drawn = false;
+  wTimeM.drawn = false;
+  wTimeS.drawn = false;
+  wAqi.drawn   = false;
+  wWind.drawn  = false;
+  wTemp.drawn  = false;
+  wAlt.drawn   = false;
   // wUv.drawn = false;
 }
 
@@ -240,10 +239,21 @@ void initDashboard() {
   // 2. Draw the static dashboard background image (matches SCREEN_W x SCREEN_H)
   gfx->draw16bitRGBBitmap(0, 0, dashboard_bg_bitmap, SCREEN_W, SCREEN_H);
 
-  // 3. The background just wiped all widget text; force a full redraw next tick.
+  // 3. Draw static time separators (colons between HH : MM : SS).
+  //    Placed in the gaps between the digit slots so the digit widgets never
+  //    paint over them. These never change, so they are drawn once here.
+  gfx->setFont(&Inter_Black_16pt);
+  gfx->setTextSize(1);
+  gfx->setTextColor(TEXT_COLOR);
+  gfx->setCursor(49, 230);   // right after hours, before minutes (natural advance)
+  gfx->print(":");
+  gfx->setCursor(105, 230);  // right after minutes, before seconds (natural advance)
+  gfx->print(":");
+
+  // 4. The background just wiped all widget text; force a full redraw next tick.
   resetDashboardWidgets();
 
-  // 4. Default text properties
+  // 5. Default text properties
   gfx->setTextSize(2);
   gfx->setTextColor(TEXT_COLOR);
 }
@@ -256,8 +266,18 @@ void updateDashboard(const DashboardData &d) {
   snprintf(distBuf, sizeof(distBuf), "%.1f", d.dist);
   updateValueWidget(wDist, distBuf);
 
-  // Time on - stopwatch since boot (HH:MM:SS)
-  updateValueWidget(wTime, formatDuration(d.timeOnSec));
+  // Time on - stopwatch since boot, split into H:M:S so only the changed
+  // segment redraws (seconds tick without blinking hours/minutes).
+  unsigned long h = d.timeOnSec / 3600;
+  unsigned long m = (d.timeOnSec % 3600) / 60;
+  unsigned long s = d.timeOnSec % 60;
+  char timeBuf[4];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu", h);
+  updateValueWidget(wTimeH, timeBuf);
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu", m);
+  updateValueWidget(wTimeM, timeBuf);
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu", s);
+  updateValueWidget(wTimeS, timeBuf);
 
   // AQI (shows "--" until the API is wired up)
   updateValueWidget(wAqi, formatMetric(d.aqi));
