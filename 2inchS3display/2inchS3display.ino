@@ -18,6 +18,7 @@
 #include "wifi_provision.h"
 #include "ui_screens.h"
 #include "server_connection.h"
+#include "air_quality.h"
 #include "dashboard.h"
 #include "nav_display.h"
 
@@ -43,6 +44,7 @@ bool  imuConnected = false;
 // Hardware Timers
 unsigned long lastIMURead = 0;
 unsigned long lastDisplayUpdate = 0;
+unsigned long lastAqWidgetRefresh = 0;  // 15-min forced refresh for AQ widgets
 bool serverConnectionStarted = false;
 
 // GPS Serial
@@ -238,10 +240,12 @@ void loop() {
       // --- Server connection: start after WiFi connects (background, non-blocking) ---
       if (hotspotConnected && !serverConnectionStarted) {
         initServerConnection();
+        initAirQuality();
         serverConnectionStarted = true;
       }
       if (serverConnectionStarted) {
         serverConnectionLoop();
+        airQualityLoop();
         // Update server with GPS data (development: dummy coords)
         updateDeviceGPS(deviceLat, deviceLng, gpsFix);
       }
@@ -282,11 +286,25 @@ void loop() {
           data.speed = 55.0f;
           data.dist  = 3.5f;
 
-          // --- Not wired yet: set these from your API once ready.
-          //     Until then they render as "--".
-          // data.aqi  = fetchedAqi;
-          // data.wind = fetchedWind;
-          // data.uv   = fetchedUv;
+          // --- Air Quality API values (fetched every 10 minutes, integers) ---
+          const AirQualityData &aq = getAirQuality();
+          if (aq.valid) {
+            data.altitude = (float) aq.elevation;  // elevation -> altitude widget
+            data.uv       = aq.uvIndex;            // uv_index  -> UV widget
+            data.aqi      = aq.usAqi;              // us_aqi    -> AQI widget
+          }
+          // Until the first fetch succeeds: altitude falls back to gpsAltitude,
+          // and UV/AQI render as "--".
+
+          // --- Force redraw of the 3 AQ widgets every 15 minutes ---
+          // Keeps the altitude/UV/AQI area fresh even if the numeric value did
+          // not change between consecutive fetches.
+          if (now - lastAqWidgetRefresh >= 15UL * 60UL * 1000UL) {
+            wAlt.drawn = false;
+            wUv.drawn  = false;
+            wAqi.drawn = false;
+            lastAqWidgetRefresh = now;
+          }
 
           updateDashboard(data);
           lastDisplayUpdate = now;

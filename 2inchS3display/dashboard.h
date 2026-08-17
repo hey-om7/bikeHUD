@@ -99,11 +99,10 @@ static ValueWidget wTimeH(5,   230, &Inter_Black_16pt);
 static ValueWidget wTimeM(61,  230, &Inter_Black_16pt);
 static ValueWidget wTimeS(117, 230, &Inter_Black_16pt);
 static ValueWidget wAqi (250, 60,  &Inter_Black_16pt);
-static ValueWidget wWind(270, 120, &Inter_Black_16pt);
+// Second right-column row is the UV slot (sun icon on the background art).
+static ValueWidget wUv  (270, 120, &Inter_Black_16pt);
 static ValueWidget wTemp(260, 175, &Inter_Black_16pt, "o", &Inter_Black8pt, 3, true);
 static ValueWidget wAlt (210, 230, &Inter_Black_16pt, "m", &Inter_Black8pt, 3, false);
-// To add UV, give it a position and uncomment its update line below:
-// static ValueWidget wUv(70, 150, &Inter_Black_16pt);
 
 // =========================================================================
 // FORMAT HELPERS
@@ -223,10 +222,9 @@ void resetDashboardWidgets() {
   wTimeM.drawn = false;
   wTimeS.drawn = false;
   wAqi.drawn   = false;
-  wWind.drawn  = false;
+  wUv.drawn    = false;
   wTemp.drawn  = false;
   wAlt.drawn   = false;
-  // wUv.drawn = false;
 }
 
 // =========================================================================
@@ -282,8 +280,8 @@ void updateDashboard(const DashboardData &d) {
   // AQI (shows "--" until the API is wired up)
   updateValueWidget(wAqi, formatMetric(d.aqi));
 
-  // Wind (shows "--" until available)
-  updateValueWidget(wWind, formatMetric(d.wind));
+  // UV index (integer; shows "--" until the API provides data)
+  updateValueWidget(wUv, formatMetric(d.uv));
 
   // Temperature (deg C)
   updateValueWidget(wTemp, String(d.temp));
@@ -292,9 +290,6 @@ void updateDashboard(const DashboardData &d) {
   char altBuf[16];
   snprintf(altBuf, sizeof(altBuf), "%d", (int)d.altitude);
   updateValueWidget(wAlt, altBuf);
-
-  // UV (uncomment once wUv has a position and d.uv is fed from the API):
-  // updateValueWidget(wUv, formatMetric(d.uv));
 }
 
 #endif  // DASHBOARD_H
