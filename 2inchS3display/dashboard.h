@@ -73,6 +73,10 @@ struct ValueWidget {
   const GFXfont *suffixFont; // font for the suffix
   int16_t gap;               // pixels between value and suffix
   bool alignTop;             // align suffix to top (true) or bottom (false)
+  int16_t centerX;           // if >= 0, horizontally center the value on this X
+                             // (so 2- and 3-digit values stay centered in the
+                             //  card); if < 0, left-align at x. Suffix widgets
+                             //  are always left-aligned.
 
   // Cache (managed internally)
   String   lastText;
@@ -82,9 +86,9 @@ struct ValueWidget {
 
   ValueWidget(int16_t x_, int16_t y_, const GFXfont *font_,
               const char *suffix_ = "", const GFXfont *suffixFont_ = nullptr,
-              int16_t gap_ = 0, bool alignTop_ = true)
+              int16_t gap_ = 0, bool alignTop_ = true, int16_t centerX_ = -1)
     : x(x_), y(y_), font(font_), suffix(suffix_), suffixFont(suffixFont_),
-      gap(gap_), alignTop(alignTop_),
+      gap(gap_), alignTop(alignTop_), centerX(centerX_),
       lastText(""), clrX(0), clrY(0), clrW(0), clrH(0), drawn(false) {}
 };
 
@@ -98,9 +102,12 @@ static ValueWidget wDist(5,   50,  &Inter_Black_16pt, "km", &Inter_Black8pt, 10,
 static ValueWidget wTimeH(5,   230, &Inter_Black_16pt);
 static ValueWidget wTimeM(61,  230, &Inter_Black_16pt);
 static ValueWidget wTimeS(117, 230, &Inter_Black_16pt);
-static ValueWidget wAqi (250, 60,  &Inter_Black_16pt);
-// Second right-column row is the UV slot (sun icon on the background art).
-static ValueWidget wUv  (270, 120, &Inter_Black_16pt);
+// AQI value is centered in its card (center X = 280) so 2- and 3-digit values
+// stay centered instead of left-aligning.
+static ValueWidget wAqi (250, 60,  &Inter_Black_16pt, "", nullptr, 0, true, 280);
+// Second right-column row is the UV slot (sun icon on the background art). The
+// circular gauge intrudes here, so the card center sits slightly right (288).
+static ValueWidget wUv  (270, 120, &Inter_Black_16pt, "", nullptr, 0, true, 288);
 static ValueWidget wTemp(260, 175, &Inter_Black_16pt, "o", &Inter_Black8pt, 3, true);
 static ValueWidget wAlt (210, 230, &Inter_Black_16pt, "m", &Inter_Black8pt, 3, false);
 
@@ -152,8 +159,18 @@ void renderValue(ValueWidget &w, const String &text,
   gfx->setFont(w.font);
   int16_t mx, my;
   uint16_t mw, mh;
+  // First measure the text so we can horizontally center it if requested.
   gfx->getTextBounds(text, w.x, w.y, &mx, &my, &mw, &mh);
-  gfx->setCursor(w.x, w.y);
+
+  // Effective left origin: centered on centerX when enabled, else fixed x.
+  int16_t drawX = (w.centerX >= 0) ? (int16_t)(w.centerX - (int16_t)mw / 2) : w.x;
+
+  // Re-measure at the final origin so the reported footprint is accurate.
+  if (w.centerX >= 0) {
+    gfx->getTextBounds(text, drawX, w.y, &mx, &my, &mw, &mh);
+  }
+
+  gfx->setCursor(drawX, w.y);
   gfx->print(text);
 
   int16_t x1 = mx, y1 = my;
@@ -162,7 +179,7 @@ void renderValue(ValueWidget &w, const String &text,
   // ---- Optional suffix ----
   if (w.suffix && w.suffix[0] != '\0' && w.suffixFont) {
     gfx->setFont(w.suffixFont);
-    int16_t sx = w.x + (int16_t)mw + w.gap;
+    int16_t sx = drawX + (int16_t)mw + w.gap;
 
     int16_t sbx, sby;
     uint16_t sbw, sbh;
