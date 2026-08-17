@@ -32,11 +32,11 @@ const PERSPECTIVE_NARROW = 0.65; // lateral narrowing at the horizon (matches fi
 // ===== View + framing =====
 const VIEW_RADIUS_M = 140;   // how far ahead we render (keeps it a LOCAL view)
 const BEHIND_M = 18;         // small tail behind the rider so the line enters from below
-const FRAME_STEP_M = 25;     // distance between sampled frames along the route
+const FRAME_STEP_M = 10;     // distance between sampled frames along the route
 const MAX_FRAMES = 400;      // hard cap so long routes don't explode memory
 
 // ===== Device buffer limits (must match server_connection.h on the ESP32) =====
-const MAX_MAIN_PATH_POINTS = 64;
+const MAX_MAIN_PATH_POINTS = 96;
 const MAX_SIDE_PATHS = 10;
 const MAX_SIDE_PATH_POINTS = 12;
 
@@ -45,7 +45,7 @@ const PX_PER_M = (PATH_BOT_Y - PATH_TOP_Y) / VIEW_RADIUS_M;
 // Max ground length (m) of a road segment before we interpolate extra points.
 // OSM ways can place two nodes hundreds of meters apart on a straight road; we
 // densify so the portion crossing our small view window is actually sampled.
-const DENSIFY_M = 10;
+const DENSIFY_M = 4;
 
 // ---- Geo helpers ----
 
@@ -80,8 +80,9 @@ function project(lat0, lng0, headingDeg, lat, lng) {
   let t = (PATH_BOT_Y - preY) / (PATH_BOT_Y - PATH_TOP_Y);
   if (t < 0) t = 0; if (t > 1) t = 1;
   const pf = 1 - t * PERSPECTIVE_NARROW;
-  const x = Math.round(CENTER_X + (preX - CENTER_X) * pf);
-  const y = Math.round(preY);
+  const x = CENTER_X + (preX - CENTER_X) * pf;
+
+  const y = preY;
 
   return { x, y, forward, right };
 }
@@ -107,7 +108,21 @@ function cap(points, max) {
 
 function pushDedup(arr, x, y) {
   const last = arr[arr.length - 1];
-  if (!last || last[0] !== x || last[1] !== y) arr.push([x, y]);
+
+  if (!last) {
+    arr.push([x, y]);
+    return;
+  }
+
+  const dx = x - last[0];
+  const dy = y - last[1];
+
+  // Remove only truly redundant points.
+  if ((dx * dx + dy * dy) < 0.04) {
+    return;
+  }
+
+  arr.push([x, y]);
 }
 
 /**

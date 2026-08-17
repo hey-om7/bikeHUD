@@ -19,6 +19,33 @@
     box-shadow: 0 8px 32px rgba(0,0,0,.7), 0 0 0 6px #1c1f24, 0 0 0 7px #2c313a;
   }
   canvas { display: block; image-rendering: pixelated; width: 640px; height: 480px; }
+  .view-toggle {
+    display: flex; gap: 0; border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+  }
+  .view-toggle button {
+    background: var(--panel); color: var(--dim); border: none; padding: 8px 20px;
+    font-size: 12px; font-weight: 500; cursor: pointer; transition: all .15s;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .view-toggle button.active { background: var(--accent); color: #000; }
+  .view-toggle button:hover:not(.active) { color: var(--txt); background: var(--line); }
+  .displays-container { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  .display-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .display-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+  #topdownPanel { display: none; }
+  #topdownPanel.visible { display: flex; }
+  #espPanel { display: flex; }
+  .topdown-stage {
+    background: #0a1628; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,.7), 0 0 0 6px #1c1f24, 0 0 0 7px #2c313a;
+  }
+  #topdownCanvas { display: block; width: 640px; height: 480px; }
+  .topdown-info {
+    width: 100%; max-width: 640px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px; font-size: 12px; color: var(--dim);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+  .topdown-info .hl { color: var(--txt); font-weight: 500; }
   .controls {
     width: 100%; max-width: 640px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px;
@@ -32,12 +59,36 @@
   .info .hl { color: var(--txt); font-weight: 500; }
   .loading { color: var(--dim); font-size: 14px; margin-top: 60px; }
   .error { color: #f66; font-size: 14px; margin-top: 60px; }
+  .both-view .displays-container { display: flex; }
+  .both-view #topdownPanel, .both-view #espPanel { display: flex; }
 </style>
 </head>
 <body>
   <h1>Tripper - ESP Display Preview</h1>
-  <p class="sub">Exact 320x240 representation of the ESP navigation screen. Drag the seekbar to move through the route.</p>
-  <div class="stage"><canvas id="screen" width="320" height="240"></canvas></div>
+  <p class="sub">Verify navigation roads. Toggle views: ESP (perspective) vs Top-Down (geographic truth). The top-down map shows the exact same road data the ESP renders.</p>
+
+  <div class="view-toggle">
+    <button id="btnEsp" class="active" onclick="setView('esp')">ESP View</button>
+    <button id="btnTopdown" onclick="setView('topdown')">Top-Down Map</button>
+    <button id="btnBoth" onclick="setView('both')">Both</button>
+  </div>
+
+  <div class="displays-container">
+    <div class="display-panel" id="espPanel">
+      <span class="display-label">ESP Display (320×240 perspective)</span>
+      <div class="stage"><canvas id="screen" width="320" height="240"></canvas></div>
+    </div>
+    <div class="display-panel" id="topdownPanel">
+      <span class="display-label">Top-Down Vector Map (geographic verification)</span>
+      <div class="topdown-stage"><canvas id="topdownCanvas" width="640" height="480"></canvas></div>
+      <div class="topdown-info">
+        <span>Source: <span class="hl" id="tdSource">-</span></span>
+        <span>Destination: <span class="hl" id="tdDest">-</span></span>
+        <span>Roads: <span class="hl" id="tdRoads">-</span></span>
+      </div>
+    </div>
+  </div>
+
   <div class="controls">
     <div class="row">
       <label>Progress</label>
@@ -57,6 +108,20 @@
   <div class="error" id="errMsg" style="display:none"></div>
 
 <script>
+// ---- View toggle ----
+let currentView = 'esp';
+function setView(mode) {
+  currentView = mode;
+  document.getElementById('btnEsp').classList.toggle('active', mode === 'esp');
+  document.getElementById('btnTopdown').classList.toggle('active', mode === 'topdown');
+  document.getElementById('btnBoth').classList.toggle('active', mode === 'both');
+  const esp = document.getElementById('espPanel');
+  const td = document.getElementById('topdownPanel');
+  if (mode === 'esp') { esp.style.display = 'flex'; td.style.display = 'none'; }
+  else if (mode === 'topdown') { esp.style.display = 'none'; td.style.display = 'flex'; }
+  else { esp.style.display = 'flex'; td.style.display = 'flex'; }
+}
+
 // ---- Constants (mirror nav_display.h) ----
 const SCREEN_W = 320, SCREEN_H = 240;
 const NAV_CX = 160, NAV_PATH_BOT_Y = 175, NAV_PATH_TOP_Y = 25;
@@ -65,6 +130,11 @@ const NAV_BG = 0x0000, NAV_PATH_COL = 0xFFFF, NAV_DIM = 0x4208, NAV_SIDE = 0x841
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
+
+// ---- Top-down canvas ----
+const tdCanvas = document.getElementById('topdownCanvas');
+const tdCtx = tdCanvas.getContext('2d');
+const TD_W = 640, TD_H = 480;
 
 // ---- RGB565 helpers ----
 function rgb565ToCss(v) {
@@ -83,7 +153,7 @@ function navPathThickness(y) {
   return Math.max(PATH_MIN_THICK, Math.round(PATH_MAX_THICK - t*(PATH_MAX_THICK - PATH_MIN_THICK)));
 }
 
-// ---- Drawing functions (mirror firmware) ----
+// ---- ESP Drawing functions (mirror firmware) ----
 function drawSeg(x0,y0,x1,y1,width,col565) {
   ctx.strokeStyle = rgb565ToCss(col565);
   ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -91,15 +161,13 @@ function drawSeg(x0,y0,x1,y1,width,col565) {
 }
 
 function drawSideRoads(chunk) {
-  // Mirror nav_display.h drawSideRoads: steady gray surrounding roads with a
-  // gentle near->far depth cue (never fading fully into the background).
   for (const sp of chunk.sidePaths) {
     if (sp.length < 2) continue;
     for (let i = 0; i < sp.length - 1; i++) {
       const [x0,y0] = sp[i], [x1,y1] = sp[i+1];
       let t = (NAV_PATH_BOT_Y - (y0+y1)/2) / (NAV_PATH_BOT_Y - NAV_PATH_TOP_Y);
       t = Math.max(0, Math.min(1, t));
-      const col = navBlend565(0xAD55, 0x630C, t); // near light-gray -> far mid-gray
+      const col = navBlend565(0xAD55, 0x630C, t);
       drawSeg(x0,y0,x1,y1, t<0.5?2:1, col);
     }
   }
@@ -194,6 +262,203 @@ function renderFrame(chunk) {
   drawProgressArc(chunk);
 }
 
+// ======== TOP-DOWN VECTOR MAP ========
+// Renders the same geographic data (route geometry + surrounding roads)
+// as a top-down orthographic map, so you can verify roads match reality.
+
+let geoData = null; // { geometry, roads, source, destination, totalDistance }
+
+function computeGeoBounds(geometry, roads) {
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  const expand = (lng, lat) => {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  };
+  for (const [lng, lat] of geometry) expand(lng, lat);
+  for (const road of roads) {
+    for (const [lng, lat] of road) expand(lng, lat);
+  }
+  // Add some padding (10%)
+  const padLat = (maxLat - minLat) * 0.1 || 0.001;
+  const padLng = (maxLng - minLng) * 0.1 || 0.001;
+  return { minLat: minLat - padLat, maxLat: maxLat + padLat, minLng: minLng - padLng, maxLng: maxLng + padLng };
+}
+
+function geoToScreen(lng, lat, bounds) {
+  // Simple equirectangular projection, top-down
+  const x = ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * (TD_W - 40) + 20;
+  // Lat increases upward, screen Y increases downward
+  const y = TD_H - 20 - ((lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * (TD_H - 40);
+  return [x, y];
+}
+
+function renderTopDown(frameIndex) {
+  if (!geoData) return;
+  const { geometry, roads, source, destination, totalDistance } = geoData;
+
+  // Compute bounds for this view — use a window around current position for local view
+  // or full route if we want to see everything
+  const bounds = computeGeoBounds(geometry, roads);
+
+  tdCtx.fillStyle = '#0a1628';
+  tdCtx.fillRect(0, 0, TD_W, TD_H);
+
+  // Draw grid lines for reference
+  tdCtx.strokeStyle = 'rgba(255,255,255,0.04)';
+  tdCtx.lineWidth = 1;
+  const gridSteps = 8;
+  for (let i = 1; i < gridSteps; i++) {
+    const gx = 20 + (TD_W - 40) * (i / gridSteps);
+    const gy = 20 + (TD_H - 40) * (i / gridSteps);
+    tdCtx.beginPath(); tdCtx.moveTo(gx, 20); tdCtx.lineTo(gx, TD_H - 20); tdCtx.stroke();
+    tdCtx.beginPath(); tdCtx.moveTo(20, gy); tdCtx.lineTo(TD_W - 20, gy); tdCtx.stroke();
+  }
+
+  // Draw surrounding roads (gray)
+  for (const road of roads) {
+    if (road.length < 2) continue;
+    tdCtx.strokeStyle = 'rgba(140, 150, 170, 0.5)';
+    tdCtx.lineWidth = 1.5;
+    tdCtx.lineCap = 'round';
+    tdCtx.lineJoin = 'round';
+    tdCtx.beginPath();
+    const [sx, sy] = geoToScreen(road[0][0], road[0][1], bounds);
+    tdCtx.moveTo(sx, sy);
+    for (let i = 1; i < road.length; i++) {
+      const [px, py] = geoToScreen(road[i][0], road[i][1], bounds);
+      tdCtx.lineTo(px, py);
+    }
+    tdCtx.stroke();
+  }
+
+  // Draw main route (white, thick)
+  if (geometry.length >= 2) {
+    tdCtx.strokeStyle = '#ffffff';
+    tdCtx.lineWidth = 3;
+    tdCtx.lineCap = 'round';
+    tdCtx.lineJoin = 'round';
+    tdCtx.beginPath();
+    const [sx, sy] = geoToScreen(geometry[0][0], geometry[0][1], bounds);
+    tdCtx.moveTo(sx, sy);
+    for (let i = 1; i < geometry.length; i++) {
+      const [px, py] = geoToScreen(geometry[i][0], geometry[i][1], bounds);
+      tdCtx.lineTo(px, py);
+    }
+    tdCtx.stroke();
+  }
+
+  // Draw current rider position (based on frame index / progress)
+  if (chunks.length > 0 && frameIndex !== undefined) {
+    const progress = frameIndex / Math.max(1, chunks.length - 1);
+    // Interpolate position along the route geometry
+    const targetDist = progress * totalDistance;
+    let riderLng, riderLat;
+    let cumDist = 0;
+    for (let i = 1; i < geometry.length; i++) {
+      const [lng0, lat0] = geometry[i - 1];
+      const [lng1, lat1] = geometry[i];
+      const segDist = haversineDist(lat0, lng0, lat1, lng1);
+      if (cumDist + segDist >= targetDist) {
+        const ratio = (targetDist - cumDist) / (segDist || 1);
+        riderLng = lng0 + (lng1 - lng0) * ratio;
+        riderLat = lat0 + (lat1 - lat0) * ratio;
+        break;
+      }
+      cumDist += segDist;
+    }
+    if (riderLng === undefined) {
+      riderLng = geometry[geometry.length - 1][0];
+      riderLat = geometry[geometry.length - 1][1];
+    }
+
+    // Draw rider as a pulsing dot
+    const [rx, ry] = geoToScreen(riderLng, riderLat, bounds);
+    tdCtx.fillStyle = 'rgba(255, 171, 48, 0.3)';
+    tdCtx.beginPath(); tdCtx.arc(rx, ry, 14, 0, Math.PI * 2); tdCtx.fill();
+    tdCtx.fillStyle = '#ffab30';
+    tdCtx.beginPath(); tdCtx.arc(rx, ry, 6, 0, Math.PI * 2); tdCtx.fill();
+    tdCtx.fillStyle = '#fff';
+    tdCtx.beginPath(); tdCtx.arc(rx, ry, 3, 0, Math.PI * 2); tdCtx.fill();
+
+    // Draw the VIEW RADIUS circle around rider — shows what the ESP can see
+    tdCtx.strokeStyle = 'rgba(255, 171, 48, 0.25)';
+    tdCtx.lineWidth = 1;
+    tdCtx.setLineDash([4, 4]);
+    // Convert 140m view radius to screen pixels
+    const cosLat = Math.cos(riderLat * Math.PI / 180);
+    const viewRadiusLng = 140 / (111320 * cosLat);
+    const viewRadiusLat = 140 / 111320;
+    const [vrx1] = geoToScreen(riderLng + viewRadiusLng, riderLat, bounds);
+    const [vrx0] = geoToScreen(riderLng, riderLat, bounds);
+    const radiusPx = Math.abs(vrx1 - vrx0);
+    tdCtx.beginPath(); tdCtx.arc(rx, ry, radiusPx, 0, Math.PI * 2); tdCtx.stroke();
+    tdCtx.setLineDash([]);
+
+    // Draw heading indicator
+    if (chunks[frameIndex] && chunks[frameIndex].bearing !== undefined) {
+      const headingRad = (chunks[frameIndex].bearing - 90) * Math.PI / 180; // convert to screen coords (0=east)
+      // Actually bearing 0=north, screen 0=right, so: screen_angle = -(bearing - 90)
+      // heading-up means bearing degrees clockwise from north
+      const angle = (chunks[frameIndex].bearing) * Math.PI / 180;
+      // In screen coords: north = up = -Y, east = +X
+      const hx = rx + Math.sin(angle) * 20;
+      const hy = ry - Math.cos(angle) * 20;
+      tdCtx.strokeStyle = '#ffab30';
+      tdCtx.lineWidth = 2;
+      tdCtx.beginPath(); tdCtx.moveTo(rx, ry); tdCtx.lineTo(hx, hy); tdCtx.stroke();
+      // Arrowhead
+      tdCtx.fillStyle = '#ffab30';
+      tdCtx.beginPath();
+      const aLen = 6;
+      const aAngle = Math.atan2(hy - ry, hx - rx);
+      tdCtx.moveTo(hx, hy);
+      tdCtx.lineTo(hx - aLen * Math.cos(aAngle - 0.5), hy - aLen * Math.sin(aAngle - 0.5));
+      tdCtx.lineTo(hx - aLen * Math.cos(aAngle + 0.5), hy - aLen * Math.sin(aAngle + 0.5));
+      tdCtx.closePath(); tdCtx.fill();
+    }
+  }
+
+  // Draw source marker (green)
+  if (source) {
+    const [sx, sy] = geoToScreen(source.lng, source.lat, bounds);
+    tdCtx.fillStyle = '#22c55e';
+    tdCtx.beginPath(); tdCtx.arc(sx, sy, 6, 0, Math.PI * 2); tdCtx.fill();
+    tdCtx.fillStyle = '#fff';
+    tdCtx.font = '10px sans-serif'; tdCtx.textAlign = 'center';
+    tdCtx.fillText('S', sx, sy + 3.5);
+  }
+
+  // Draw destination marker (red)
+  if (destination) {
+    const [dx, dy] = geoToScreen(destination.lng, destination.lat, bounds);
+    tdCtx.fillStyle = '#ef4444';
+    tdCtx.beginPath(); tdCtx.arc(dx, dy, 6, 0, Math.PI * 2); tdCtx.fill();
+    tdCtx.fillStyle = '#fff';
+    tdCtx.font = '10px sans-serif'; tdCtx.textAlign = 'center';
+    tdCtx.fillText('D', dx, dy + 3.5);
+  }
+
+  // Draw compass
+  tdCtx.fillStyle = 'rgba(255,255,255,0.6)';
+  tdCtx.font = '10px sans-serif'; tdCtx.textAlign = 'center';
+  tdCtx.fillText('N', TD_W - 25, 20);
+  tdCtx.strokeStyle = 'rgba(255,255,255,0.4)';
+  tdCtx.lineWidth = 1;
+  tdCtx.beginPath(); tdCtx.moveTo(TD_W - 25, 23); tdCtx.lineTo(TD_W - 25, 38); tdCtx.stroke();
+  tdCtx.fillStyle = 'rgba(255,255,255,0.4)';
+  tdCtx.beginPath(); tdCtx.moveTo(TD_W - 25, 22); tdCtx.lineTo(TD_W - 28, 28); tdCtx.lineTo(TD_W - 22, 28); tdCtx.closePath(); tdCtx.fill();
+}
+
+function haversineDist(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
 // ---- Load route data and wire seekbar ----
 const params = new URLSearchParams(window.location.search);
 const apiBase = params.get('api') || 'http://localhost:3001';
@@ -209,6 +474,7 @@ async function loadRoute() {
     return;
   }
   try {
+    // Load ESP preview chunks (pre-rendered frames)
     const res = await fetch(`${apiBase}/api/navigate/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -220,6 +486,24 @@ async function loadRoute() {
       return;
     }
     chunks = data.chunks;
+
+    // Also load raw geographic data for top-down verification map
+    const geoRes = await fetch(`${apiBase}/api/navigate/geo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, destLat, destLng })
+    });
+    const geoJson = await geoRes.json();
+    if (geoRes.ok && geoJson.success) {
+      geoData = geoJson;
+      document.getElementById('tdSource').textContent =
+        `${geoJson.source.lat.toFixed(5)}, ${geoJson.source.lng.toFixed(5)}`;
+      document.getElementById('tdDest').textContent =
+        `${geoJson.destination.lat.toFixed(5)}, ${geoJson.destination.lng.toFixed(5)}`;
+      document.getElementById('tdRoads').textContent =
+        `${geoJson.roads.length} segments`;
+    }
+
     document.getElementById('loadMsg').style.display = 'none';
     document.getElementById('routeInfo').textContent =
       `${data.summary.distance} \u2022 ${data.summary.duration} \u2022 ${chunks.length} chunks`;
@@ -237,6 +521,7 @@ function updateFrame(index) {
   if (index < 0 || index >= chunks.length) return;
   const chunk = chunks[index];
   renderFrame(chunk);
+  renderTopDown(index);
   document.getElementById('seekVal').textContent = `${index+1} / ${chunks.length}`;
   document.getElementById('instr').textContent = chunk.instruction || '-';
   document.getElementById('dist').textContent = chunk.distance >= 1000

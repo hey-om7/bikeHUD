@@ -12,7 +12,15 @@
  *     summary:      { distance, duration, startAddress, endAddress }
  *   }
  *
- * Route source: Google Directions (if GOOGLE_MAPS_API_KEY set), else a mock.
+ * ROUTING PROVIDERS (a single abstraction — callers never pick a provider):
+ *   1. Google Directions API  (primary, if GOOGLE_MAPS_API_KEY is set)
+ *   2. OSRM  (OpenStreetMap routing engine, automatic fallback, no key needed)
+ *
+ * The route geometry is ALWAYS taken verbatim from the provider's response.
+ * We never interpolate, smooth, curve, or synthesise the route ourselves, and
+ * we never substitute a straight origin->destination line. If BOTH providers
+ * fail, generateRoute throws — we surface the failure rather than fabricate.
+ *
  * Nearby roads: OpenStreetMap Overpass API `way(around:...)` along the route
  *               (no key needed, bounded to a thin corridor around the path).
  */
@@ -20,6 +28,12 @@
 import { Client } from '@googlemaps/google-maps-services-js';
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
+
+// OSRM (OpenStreetMap routing engine) — the OSM-compatible routing service
+// already used elsewhere in this project (see python-app/get_route.py).
+// This is a REAL routing engine that returns road-following geometry; OSM map
+// data alone cannot compute a route, OSRM is what does the routing.
+const OSRM_URL = process.env.OSRM_URL || 'https://router.project-osrm.org';
 
 // Corridor half-width (meters) for the "nearby roads" Overpass query.
 // Keep this tight — we only ever render a small local view on the device.
@@ -38,22 +52,33 @@ export class NavigationEngine {
   /**
    * Generate navigation data from source to destination.
    * Returns raw geographic geometry (see module header) ready for framing.
+   *
+   * Provider order: Google Directions (primary) -> OSRM (fallback). The route
+   * geometry is taken verbatim from whichever provider answers; we never
+   * synthesise it. Throws if BOTH providers fail.
    */
   async generateRoute(sourceLat, sourceLng, destLat, destLng) {
-    let route;
+    let route = null;
+
+    // 1. Primary provider: Google Directions (only if a key is configured).
     if (GOOGLE_MAPS_API_KEY) {
       try {
         route = await this.generateGoogleRoute(sourceLat, sourceLng, destLat, destLng);
+        console.log('[NAV] Route provided by Google Directions');
       } catch (e) {
-        console.error('[NAV] Google Maps API error, falling back to mock:', e.message);
+        // Any Google failure (403 / auth / quota / unavailable / invalid /
+        // routing / network) falls through to the OSRM fallback below.
+        console.error('[NAV] Google Directions failed, falling back to OSRM:', e.message);
       }
     }
+
+    // 2. Fallback provider: OSRM (OpenStreetMap routing engine).
     if (!route) {
-      route = this.generateMockRoute(sourceLat, sourceLng, destLat, destLng);
+      route = await this.generateOSRMRoute(sourceLat, sourceLng, destLat, destLng);
+      console.log('[NAV] Route provided by OSRM (OpenStreetMap)');
     }
 
     // Fetch surrounding roads for the gray context layer (best-effort).
-    // Real OSM roads win; fall back to any synthetic/mock roads, then to none.
     try {
       const roads = await this.fetchNearbyRoads(route.geometry);
       route.roads = roads.length ? roads : (route.roads || []);
@@ -133,51 +158,78 @@ export class NavigationEngine {
   }
 
   /**
-   * Mock route (no API key): a gently bending path plus a handful of synthetic
-   * cross/parallel roads so the framing pipeline has something to render.
+   * OSRM fallback route (OpenStreetMap routing engine).
+   *
+   * Requests a real driving route from OSRM and uses its road-following
+   * geometry verbatim. OSRM returns GeoJSON coordinates already in [lng,lat]
+   * order (our internal format) and per-step maneuvers for turn points.
+   *
+   * Throws on any failure (HTTP error, non-"Ok" code, empty routes, network) —
+   * we never fabricate a route as a substitute.
    */
-  generateMockRoute(srcLat, srcLng, dstLat, dstLng) {
-    const N = 60;
-    const geometry = [];
-    for (let i = 0; i <= N; i++) {
-      const t = i / N;
-      // Base interpolation + a couple of sine bends for visual interest.
-      const lat = srcLat + (dstLat - srcLat) * t + Math.sin(t * Math.PI * 3) * 0.0008;
-      const lng = srcLng + (dstLng - srcLng) * t + Math.sin(t * Math.PI * 2) * 0.0010;
-      geometry.push([lng, lat]);
+  async generateOSRMRoute(srcLat, srcLng, dstLat, dstLng) {
+    // OSRM path format: /route/v1/driving/{lon},{lat};{lon},{lat}
+    const coords = `${srcLng},${srcLat};${dstLng},${dstLat}`;
+    const url =
+      `${OSRM_URL}/route/v1/driving/${coords}` +
+      `?overview=full&geometries=geojson&steps=true`;
+
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'TripPilot/1.0' },
+        signal: AbortSignal.timeout(15000)
+      });
+    } catch (e) {
+      throw new Error(`OSRM network error: ${e.message}`);
+    }
+    if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
+
+    const data = await res.json();
+    if (data.code !== 'Ok' || !Array.isArray(data.routes) || !data.routes.length) {
+      throw new Error(`OSRM routing failed: ${data.code || 'no route'}`);
+    }
+
+    const route = data.routes[0];
+
+    // Provider geometry taken verbatim — already [[lng,lat], ...].
+    const geometry = route.geometry.coordinates.map(([lng, lat]) => [lng, lat]);
+    if (geometry.length < 2) {
+      throw new Error('OSRM returned degenerate geometry');
     }
 
     const cum = cumulativeDistances(geometry);
-    const totalDistance = cum[cum.length - 1];
+    const totalDistance = route.distance ?? cum[cum.length - 1];
 
-    // Synthetic surrounding roads: cross streets every few vertices + one parallel.
-    const roads = [];
-    for (let i = 6; i < geometry.length - 6; i += 8) {
-      const [lng, lat] = geometry[i];
-      // Perpendicular-ish cross street.
-      roads.push([
-        [lng - 0.0016, lat + 0.0010],
-        [lng, lat],
-        [lng + 0.0016, lat - 0.0010]
-      ]);
+    // Turn points from OSRM step maneuvers. Each step's maneuver marks where the
+    // NEXT road segment begins; place the marker at that maneuver location.
+    const turnPoints = [];
+    const steps = (route.legs && route.legs[0] && route.legs[0].steps) || [];
+    for (const step of steps) {
+      const m = step.maneuver || {};
+      const loc = m.location; // [lng, lat]
+      if (!loc) continue;
+      const idx = nearestVertexIndex(geometry, loc[0], loc[1]);
+      turnPoints.push({
+        dist: cum[idx],
+        direction: this.osrmManeuverToDirection(m),
+        instruction: this.osrmInstruction(step, m)
+      });
     }
-    const parallel = geometry.filter((_, i) => i % 3 === 0).map(([lng, lat]) => [lng + 0.0012, lat + 0.0009]);
-    if (parallel.length >= 2) roads.push(parallel);
-
-    const turnPoints = [
-      { dist: totalDistance * 0.33, direction: 'R', instruction: 'Turn right' },
-      { dist: totalDistance * 0.66, direction: 'L', instruction: 'Turn left' },
-      { dist: totalDistance, direction: 'S', instruction: 'Arrive' }
-    ];
+    // Ensure a final "arrive" marker at the destination.
+    if (!turnPoints.length || turnPoints[turnPoints.length - 1].dist < totalDistance - 1) {
+      turnPoints.push({ dist: totalDistance, direction: 'S', instruction: 'Arrive' });
+    }
 
     return {
       geometry,
-      roads, // mock supplies its own; generateRoute won't overwrite (see below)
       turnPoints,
       totalDistance,
       summary: {
-        distance: totalDistance > 1000 ? `${(totalDistance / 1000).toFixed(1)} km` : `${Math.round(totalDistance)} m`,
-        duration: `${Math.max(1, Math.round(totalDistance / 400))} min`,
+        distance: totalDistance > 1000
+          ? `${(totalDistance / 1000).toFixed(1)} km`
+          : `${Math.round(totalDistance)} m`,
+        duration: `${Math.max(1, Math.round((route.duration || 0) / 60))} min`,
         startAddress: `${srcLat.toFixed(4)}, ${srcLng.toFixed(4)}`,
         endAddress: `${dstLat.toFixed(4)}, ${dstLng.toFixed(4)}`
       }
@@ -219,7 +271,10 @@ export class NavigationEngine {
         'User-Agent': 'TripPilot/1.0 (navigation device backend)',
         'Accept': 'application/json'
       },
-      body: 'data=' + encodeURIComponent(query)
+      body: 'data=' + encodeURIComponent(query),
+      // Hard cap: nearby roads are cosmetic context. Never let a slow Overpass
+      // response block route delivery — abort and fall back to route-only.
+      signal: AbortSignal.timeout(12000)
     });
     if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
     const data = await res.json();
@@ -242,6 +297,43 @@ export class NavigationEngine {
     if (maneuver.includes('left')) return 'L';
     if (maneuver.includes('uturn') || maneuver.includes('u-turn')) return 'U';
     return 'S';
+  }
+
+  /**
+   * Map an OSRM maneuver object to a direction code (R/L/U/S).
+   * OSRM uses `type` (turn/roundabout/fork/...) + `modifier`
+   * (left/right/slight left/sharp right/uturn/straight).
+   */
+  osrmManeuverToDirection(m) {
+    if (!m) return 'S';
+    const mod = (m.modifier || '').toLowerCase();
+    const type = (m.type || '').toLowerCase();
+    if (type === 'arrive' || type === 'depart') return 'S';
+    if (mod.includes('uturn')) return 'U';
+    if (mod.includes('right')) return 'R';
+    if (mod.includes('left')) return 'L';
+    return 'S';
+  }
+
+  /**
+   * Build a short instruction string from an OSRM step.
+   */
+  osrmInstruction(step, m) {
+    const type = (m && m.type) || '';
+    const mod = (m && m.modifier) || '';
+    const road = step && step.name ? step.name : '';
+    if (type === 'arrive') return 'Arrive';
+    if (type === 'depart') return road ? `Head onto ${road}` : 'Depart';
+    if (type === 'roundabout' || type === 'rotary') return 'Enter roundabout';
+    if (type === 'exit roundabout' || type === 'exit rotary') {
+      return road ? `Exit onto ${road}` : 'Exit roundabout';
+    }
+    let verb = 'Continue';
+    if (mod.includes('uturn')) verb = 'Make a U-turn';
+    else if (mod.includes('right')) verb = mod.includes('slight') ? 'Slight right' : (mod.includes('sharp') ? 'Sharp right' : 'Turn right');
+    else if (mod.includes('left')) verb = mod.includes('slight') ? 'Slight left' : (mod.includes('sharp') ? 'Sharp left' : 'Turn left');
+    const text = road ? `${verb} onto ${road}` : verb;
+    return text.length > 30 ? text.substring(0, 28) + '..' : text;
   }
 
   cleanInstruction(html) {

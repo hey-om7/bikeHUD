@@ -123,6 +123,23 @@ export function createApiRouter(deviceManager, navEngine) {
     });
   });
 
+  // GET /api/getGPSCoordinates/:id - fetch current GPS coordinates from device
+  // This is the canonical way to get the device's current location for navigation.
+  router.get('/getGPSCoordinates/:id', (req, res) => {
+    const device = deviceManager.getDevice(req.params.id);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    // Request fresh GPS fix from hardware
+    deviceManager.requestGPS(req.params.id);
+    res.json({
+      lat: device.lat,
+      lng: device.lng,
+      gpsValid: device.gpsValid,
+      timestamp: device.lastSeen
+    });
+  });
+
   // ===== Navigation =====
   // POST /api/navigate - start navigation
   // Body: { deviceId, destLat, destLng }
@@ -141,11 +158,17 @@ export function createApiRouter(deviceManager, navEngine) {
       return res.status(409).json({ error: 'Device is offline' });
     }
 
+    // Request fresh GPS from device before routing
+    deviceManager.requestGPS(deviceId);
+
     try {
-      // Generate route geometry from device's current position to destination,
-      // then render it into heading-up, view-culled frames for the device.
+      // Use device's current GPS coordinates (getGPSCoordinates) as source
+      const sourceLat = device.lat;
+      const sourceLng = device.lng;
+      console.log(`[NAV] Starting navigation from GPS (${sourceLat}, ${sourceLng}) to (${destLat}, ${destLng})`);
+
       const route = await navEngine.generateRoute(
-        device.lat, device.lng,
+        sourceLat, sourceLng,
         destLat, destLng
       );
       const frames = buildFrames(route);
@@ -159,7 +182,8 @@ export function createApiRouter(deviceManager, navEngine) {
       res.json({
         success: true,
         summary: route.summary,
-        totalChunks: frames.length
+        totalChunks: frames.length,
+        source: { lat: sourceLat, lng: sourceLng }
       });
     } catch (e) {
       console.error('[API] Navigation error:', e);
@@ -197,6 +221,47 @@ export function createApiRouter(deviceManager, navEngine) {
     } catch (e) {
       console.error('[API] Preview generation error:', e);
       res.status(500).json({ error: 'Failed to generate route preview' });
+    }
+  });
+
+  // POST /api/navigate/geo - return raw geographic data (route + roads) for verification
+  // This gives the same geometry the frame renderer uses, but as lat/lng coords
+  // so the web view can render a top-down vector map to verify correctness.
+  router.post('/navigate/geo', async (req, res) => {
+    const { deviceId, destLat, destLng } = req.body;
+
+    if (!deviceId || destLat === undefined || destLng === undefined) {
+      return res.status(400).json({ error: 'Missing deviceId, destLat, or destLng' });
+    }
+
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    try {
+      // Use getGPSCoordinates from the device for source
+      const sourceLat = device.lat;
+      const sourceLng = device.lng;
+
+      const route = await navEngine.generateRoute(
+        sourceLat, sourceLng,
+        destLat, destLng
+      );
+
+      res.json({
+        success: true,
+        source: { lat: sourceLat, lng: sourceLng },
+        destination: { lat: destLat, lng: destLng },
+        geometry: route.geometry,       // [[lng,lat], ...] - the main route
+        roads: route.roads,             // [[[lng,lat], ...], ...] - surrounding roads
+        turnPoints: route.turnPoints,
+        totalDistance: route.totalDistance,
+        summary: route.summary
+      });
+    } catch (e) {
+      console.error('[API] Geo data generation error:', e);
+      res.status(500).json({ error: 'Failed to generate geographic data' });
     }
   });
 
