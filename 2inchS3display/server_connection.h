@@ -78,6 +78,13 @@ static bool hasNewChunk = false;
 static unsigned long lastServerAttempt = 0;
 static bool serverModuleInitialized = false;
 
+// ===== Double-Buffered Frames for Smooth Interpolation =====
+// We keep TWO consecutive frames so the display can lerp between them.
+static NavChunk frameA;        // The frame we're interpolating FROM
+static NavChunk frameB;        // The frame we're interpolating TO
+static bool frameBReady = false;  // frameB has valid data to interpolate toward
+static bool frameAValid = false;  // frameA has been populated at least once
+
 // GPS Mock/Interface (development mode - dummy coordinates)
 static float deviceLat = 18.5534;   // Kharadi, Pune
 static float deviceLng = 73.9468;
@@ -204,6 +211,24 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     }
 
     hasNewChunk = true;
+
+    // Feed the double buffer for smooth interpolation:
+    // If frameA isn't valid yet, this is the very first frame — set it directly.
+    // If frameA is valid but frameB isn't ready, load into frameB (we now have a pair).
+    // If both are valid, promote frameB→frameA and load new data into frameB.
+    if (!frameAValid) {
+      memcpy(&frameA, &currentChunk, sizeof(NavChunk));
+      frameAValid = true;
+      frameBReady = false;
+    } else if (!frameBReady) {
+      memcpy(&frameB, &currentChunk, sizeof(NavChunk));
+      frameBReady = true;
+    } else {
+      memcpy(&frameA, &frameB, sizeof(NavChunk));
+      memcpy(&frameB, &currentChunk, sizeof(NavChunk));
+      // frameBReady stays true
+    }
+
     Serial.printf("[NAV] Received chunk %d/%d: %s (%d path pts, %d side roads)\n",
       currentChunk.chunkIndex + 1, currentChunk.totalChunks,
       currentChunk.instruction, currentChunk.mainPathCount, currentChunk.sidePathCount);
@@ -290,6 +315,19 @@ NavChunk* getCurrentNavChunk() {
   return &currentChunk;
 }
 
+// ===== Interpolation Accessors =====
+NavChunk* getFrameA() { return &frameA; }
+NavChunk* getFrameB() { return &frameB; }
+bool isFrameBReady() { return frameBReady; }
+bool isFrameAValid() { return frameAValid; }
+
+// After interpolation completes (t reaches 1.0), promote frameB to frameA
+// and request the next frame from the server.
+void promoteFrameB() {
+  memcpy(&frameA, &frameB, sizeof(NavChunk));
+  frameBReady = false;
+}
+
 // Advance to next chunk after current is rendered
 void advanceNavigation() {
   if (navState != NAV_ACTIVE) return;
@@ -315,6 +353,10 @@ void clearNavigation() {
   navState = NAV_IDLE;
   hasNewChunk = false;
   memset(&currentChunk, 0, sizeof(currentChunk));
+  memset(&frameA, 0, sizeof(frameA));
+  memset(&frameB, 0, sizeof(frameB));
+  frameAValid = false;
+  frameBReady = false;
 }
 
 #endif // SERVER_CONNECTION_H

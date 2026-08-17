@@ -86,11 +86,98 @@ static bool navDisplayActive = false;
 static unsigned long lastNavRender = 0;
 static unsigned long lastFrameAdvance = 0;
 
-// How often to roll forward to the next pre-rendered frame while navigating.
-// Frames are sampled ~every 25m along the route on the server, so this sets the
-// playback speed of the rolling map (dev/sim behavior; a GPS-driven device would
-// advance based on distance travelled instead).
-#define NAV_FRAME_ADVANCE_MS  700
+// ===== Off-Screen Framebuffer (flicker-free rendering) =====
+// The ST7789 draws directly to the panel, so clearing + redrawing every frame
+// is visible as flicker. We render each nav frame into an in-memory canvas
+// (allocated in PSRAM) and push the finished frame to the panel in ONE blit.
+// This removes the fillScreen/redraw flash entirely.
+static Arduino_Canvas *navCanvas = nullptr;
+static bool navUseCanvas = false;
+
+static void navCanvasInit() {
+  if (navCanvas) return;
+  navCanvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, gfx);
+  // Skip re-initializing the underlying panel (gfx->begin() already ran in setup).
+  navUseCanvas = navCanvas->begin(GFX_SKIP_OUTPUT_BEGIN);
+  if (!navUseCanvas) {
+    // Framebuffer allocation failed (out of memory) — fall back to direct draw.
+    delete navCanvas;
+    navCanvas = nullptr;
+    Serial.println("[NAV] Canvas alloc failed, using direct draw (may flicker)");
+  } else {
+    Serial.println("[NAV] Off-screen canvas ready (flicker-free)");
+  }
+}
+
+static void navCanvasFree() {
+  if (navCanvas) {
+    delete navCanvas;   // frees the framebuffer, reclaiming ~150KB
+    navCanvas = nullptr;
+  }
+  navUseCanvas = false;
+}
+
+// ===== Smooth Animation Parameters =====
+// Duration (ms) to interpolate between two consecutive server frames.
+// Frames are sampled ~every 10m along the route, so this controls perceived speed.
+#define NAV_FRAME_DURATION_MS  700
+
+// Target render interval (~30fps). The display redraws the interpolated state
+// at this cadence for smooth, continuous road scrolling.
+#define NAV_RENDER_INTERVAL_MS  33
+
+// Interpolation state: tracks progress from frameA toward frameB.
+static unsigned long interpStartTime = 0;   // millis() when current interpolation began
+static float interpT = 0.0f;                 // 0.0 = showing frameA, 1.0 = showing frameB
+static NavChunk interpChunk;                 // The interpolated frame rendered each tick
+static bool interpRunning = false;           // Are we actively interpolating?
+
+// ===== Interpolation: Lerp Between Two NavChunks =====
+// Generates a blended NavChunk at parameter t (0..1) between frames A and B.
+// Points are linearly interpolated; counts use the minimum of both frames so
+// we never read past valid data. Direction/instruction snap from A (t<0.5) or B.
+static void lerpNavChunks(NavChunk* a, NavChunk* b, float t, NavChunk* out) {
+  // Clamp
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  float invT = 1.0f - t;
+
+  // Main path: lerp each point. Use the minimum count so we don't overshoot.
+  uint8_t mainCount = min(a->mainPathCount, b->mainPathCount);
+  out->mainPathCount = mainCount;
+  for (uint8_t i = 0; i < mainCount; i++) {
+    out->mainPath[i].x = (int16_t)(a->mainPath[i].x * invT + b->mainPath[i].x * t + 0.5f);
+    out->mainPath[i].y = (int16_t)(a->mainPath[i].y * invT + b->mainPath[i].y * t + 0.5f);
+  }
+
+  // Side paths: lerp each side road's points (use min counts)
+  uint8_t sideCount = min(a->sidePathCount, b->sidePathCount);
+  out->sidePathCount = sideCount;
+  for (uint8_t s = 0; s < sideCount; s++) {
+    uint8_t ptCount = min(a->sidePaths[s].count, b->sidePaths[s].count);
+    out->sidePaths[s].count = ptCount;
+    for (uint8_t p = 0; p < ptCount; p++) {
+      out->sidePaths[s].points[p].x = (int16_t)(
+        a->sidePaths[s].points[p].x * invT + b->sidePaths[s].points[p].x * t + 0.5f);
+      out->sidePaths[s].points[p].y = (int16_t)(
+        a->sidePaths[s].points[p].y * invT + b->sidePaths[s].points[p].y * t + 0.5f);
+    }
+  }
+
+  // Metadata: snap direction/instruction at midpoint, lerp distance
+  if (t < 0.5f) {
+    strlcpy(out->instruction, a->instruction, sizeof(out->instruction));
+    strlcpy(out->direction, a->direction, sizeof(out->direction));
+  } else {
+    strlcpy(out->instruction, b->instruction, sizeof(out->instruction));
+    strlcpy(out->direction, b->direction, sizeof(out->direction));
+  }
+  out->distanceMeters = (uint16_t)(a->distanceMeters * invT + b->distanceMeters * t + 0.5f);
+  out->bearing = (int16_t)(a->bearing * invT + b->bearing * t + 0.5f);
+  out->chunkIndex = (t < 0.5f) ? a->chunkIndex : b->chunkIndex;
+  out->totalChunks = a->totalChunks;  // Same for both
+  out->isLast = b->isLast;
+}
 
 // ===== Draw Main Path (Continuous Solid Stroke) =====
 // Renders the server-provided polyline as ONE connected vector stroke:
@@ -226,31 +313,36 @@ static void drawDistanceAndTurn(NavChunk* chunk) {
     strcpy(unitBuf, "m");
   }
 
-  // Measure the number block (text size 3 => ~18px per glyph).
+  // Measure the number block with the BUILT-IN font (6px/glyph per size step).
+  // The dashboard leaves a large custom font (Inter_Black) selected globally, so
+  // we MUST reset to the default font here or the text overflows the screen.
+  gfx->setFont(NULL);
+
+  int numTextSize  = 2;   // distance number (default font: 12px wide, 16px tall)
+  int unitTextSize = 1;   // unit label   (default font: 6px wide, 8px tall)
+
   int distLen = strlen(distBuf);
-  int numW = distLen * 18;
-  int unitW = strlen(unitBuf) * 12;   // size 2 => ~12px per glyph
+  int numW  = distLen * 6 * numTextSize;         // glyph width = 6px * size
+  int unitW = strlen(unitBuf) * 6 * unitTextSize;
   int gap = 4;
-  int rightPad = 18;
+  int rightPad = 14;
 
   // Whole block (number + gap + unit) is right-aligned against the screen edge.
   int blockW = numW + gap + unitW;
   int numX = SCREEN_W - rightPad - blockW;
   int unitX = numX + numW + gap;
-  int blockCX = numX + blockW / 2;
 
   // Turn icon centered above the block, clear of the GPS dots up top.
-  // drawMiniTurnIcon(blockCX, distY - 24, chunk->direction);
-  drawMiniTurnIcon(numX - 20, distY + 8, chunk->direction);
+  drawMiniTurnIcon(numX - 18, distY + 6, chunk->direction);
 
-  // Distance number (large, white).
-  gfx->setTextSize(3);
+  // Distance number (white).
+  gfx->setTextSize(numTextSize);
   gfx->setTextColor(NAV_TEXT);
   gfx->setCursor(numX, distY);
   gfx->print(distBuf);
 
-  // Unit (smaller, dim, baseline-aligned to the number).
-  gfx->setTextSize(2);
+  // Unit (smaller, dim), bottom-aligned to the number (16px tall vs 8px tall).
+  gfx->setTextSize(unitTextSize);
   gfx->setTextColor(NAV_DIM);
   gfx->setCursor(unitX, distY + 8);
   gfx->print(unitBuf);
@@ -304,7 +396,13 @@ static void drawNavGPSDots() {
 }
 
 // ===== Draw Navigation Screen (Main Render) =====
+// Renders into the off-screen canvas (if available) so the finished frame is
+// pushed to the panel in a single blit — no visible clear/redraw flicker.
 void drawNavScreen(NavChunk* chunk) {
+  // Redirect all drawing helpers (which use the global gfx) into the canvas.
+  Arduino_GFX* realGfx = gfx;
+  if (navUseCanvas) gfx = navCanvas;
+
   // 1. Clean full black canvas
   gfx->fillScreen(NAV_BG);
 
@@ -325,11 +423,18 @@ void drawNavScreen(NavChunk* chunk) {
 
   // 7. Progress arc (very bottom)
   drawProgressArc(chunk);
+
+  // Push the completed frame to the panel in one operation.
+  if (navUseCanvas) {
+    gfx = realGfx;
+    navCanvas->flush();
+  }
 }
 
 // ===== Draw Navigation Complete Screen =====
 void drawNavComplete() {
   gfx->fillScreen(NAV_BG);
+  gfx->setFont(NULL);  // reset from dashboard's custom font
 
   int cx = NAV_CX;
 
@@ -357,8 +462,15 @@ void drawNavComplete() {
 // ===== Enter Navigation Mode =====
 void enterNavMode() {
   navDisplayActive = true;
+  interpRunning = false;
+  interpT = 0.0f;
   lastFrameAdvance = millis();
+  lastNavRender = 0;
+
+  navCanvasInit();     // allocate the off-screen framebuffer
+
   gfx->fillScreen(NAV_BG);
+  gfx->setFont(NULL);  // reset from dashboard's custom font
 
   gfx->setTextSize(2);
   gfx->setTextColor(NAV_TEXT);
@@ -374,6 +486,8 @@ void enterNavMode() {
 // ===== Exit Navigation Mode =====
 void exitNavMode() {
   navDisplayActive = false;
+  interpRunning = false;
+  navCanvasFree();     // reclaim the framebuffer memory
   clearNavigation();
 }
 
@@ -382,8 +496,10 @@ bool isNavDisplayActive() {
   return navDisplayActive;
 }
 
-// ===== Navigation Display Loop =====
+// ===== Navigation Display Loop (Smooth Interpolation) =====
 // Called from main loop when navigation is active.
+// Instead of jumping between frames every 700ms, this continuously interpolates
+// path points from frameA to frameB at ~30fps, creating smooth road scrolling.
 // Returns true if still in nav mode, false to return to dashboard.
 bool navDisplayLoop() {
   if (!navDisplayActive) return false;
@@ -392,15 +508,65 @@ bool navDisplayLoop() {
   NavState state = getNavState();
 
   if (state == NAV_ACTIVE) {
+    // --- Consume any fresh chunk that arrived from the server ---
     if (hasNavigationChunk()) {
-      // A fresh frame arrived from the server — render it and reset the roll timer.
-      NavChunk* chunk = getCurrentNavChunk();
-      drawNavScreen(chunk);
-      lastNavRender = now;
-      lastFrameAdvance = now;
+      getCurrentNavChunk();  // Marks as consumed; data already in frameA/B buffers
+
+      // If we now have both frames, start (or restart) interpolation
+      if (isFrameBReady()) {
+        interpStartTime = now;
+        interpT = 0.0f;
+        interpRunning = true;
+      }
+      else if (isFrameAValid() && !interpRunning) {
+        // Only frameA available (first frame ever) — render it static and request next
+        drawNavScreen(getFrameA());
+        lastNavRender = now;
+        lastFrameAdvance = now;
+        advanceNavigation();  // Request frameB from server
+      }
     }
-    else if (now - lastFrameAdvance >= NAV_FRAME_ADVANCE_MS) {
-      // Roll forward: request the next frame (or finish if this was the last).
+
+    // --- Smooth interpolation rendering at ~30fps ---
+    if (interpRunning && isFrameBReady()) {
+      unsigned long elapsed = now - interpStartTime;
+      interpT = (float)elapsed / (float)NAV_FRAME_DURATION_MS;
+
+      if (interpT >= 1.0f) {
+        // Interpolation complete: snap to frameB, promote it, request next
+        interpT = 1.0f;
+        drawNavScreen(getFrameB());
+        lastNavRender = now;
+
+        // Promote frameB → frameA, clear frameB, request next chunk
+        promoteFrameB();
+        advanceNavigation();
+        lastFrameAdvance = now;
+
+        // If a new frameB arrived during this tick it'll start next iteration;
+        // otherwise we pause interpolation until the server responds.
+        if (isFrameBReady()) {
+          interpStartTime = now;
+          interpT = 0.0f;
+        } else {
+          interpRunning = false;
+        }
+      }
+      else if (now - lastNavRender >= NAV_RENDER_INTERVAL_MS) {
+        // Mid-interpolation: render the blended frame
+        lerpNavChunks(getFrameA(), getFrameB(), interpT, &interpChunk);
+        drawNavScreen(&interpChunk);
+        lastNavRender = now;
+      }
+    }
+    else if (!interpRunning && isFrameBReady()) {
+      // frameB arrived while we weren't interpolating — kick off a new cycle
+      interpStartTime = now;
+      interpT = 0.0f;
+      interpRunning = true;
+    }
+    else if (!interpRunning && isFrameAValid() && (now - lastFrameAdvance >= NAV_FRAME_DURATION_MS)) {
+      // Stalled: no frameB arrived yet. Re-request.
       advanceNavigation();
       lastFrameAdvance = now;
     }
