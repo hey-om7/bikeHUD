@@ -29,6 +29,8 @@
 #include "Inter_Black_16pt.h"
 #include "Inter_Black12pt.h"
 #include "Inter_Black8pt.h"
+#include "signal_on.h"
+#include "signal_off.h"
 
 extern Arduino_GFX *gfx;
 extern bool hotspotConnected;
@@ -209,6 +211,32 @@ void renderValue(ValueWidget &w, const String &text,
   oh = (uint16_t)(y2 - y1);
 }
 
+// Trick: Mixes the transparent icon with the static background in RAM before drawing
+void drawIconOverBackground(int16_t startX, int16_t startY, int16_t w, int16_t h, const uint16_t* icon) {
+  // Allocate a temporary buffer for the merged image
+  // A 54x38 icon takes about ~4KB of RAM, which the ESP32 handles effortlessly
+  uint16_t buffer[w * h];
+
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      uint16_t iconPixel = icon[y * w + x];
+      
+      // If the icon pixel is our transparent mask color (pure black 0x0000)
+      if (iconPixel == 0x0000) {
+        // Fetch the true pixel from the background art instead
+        // (Assuming SCREEN_W is 320)
+        buffer[y * w + x] = dashboard_bg_bitmap[(startY + y) * 320 + (startX + x)];
+      } else {
+        // Otherwise, use the visible icon pixel
+        buffer[y * w + x] = iconPixel;
+      }
+    }
+  }
+
+  // Draw the perfectly blended image to the screen in one fast transaction
+  gfx->draw16bitRGBBitmap(startX, startY, buffer, w, h);
+}
+
 // Change-detecting update: redraws only if the value differs, restoring just
 // this widget's own previous footprint from the background image first.
 void updateValueWidget(ValueWidget &w, const String &text) {
@@ -271,6 +299,14 @@ void initDashboard() {
   // 5. Default text properties
   gfx->setTextSize(2);
   gfx->setTextColor(TEXT_COLOR);
+
+  // Format: gfx->draw16bitRGBBitmap(x, y, bitmap_array, width, height);
+
+
+  //Drawing icons for signal_on
+  drawIconOverBackground(5, 0, SIGNAL_ON_WIDTH, SIGNAL_ON_HEIGHT, signal_on_bitmap);
+  drawIconOverBackground(150, 0, SIGNAL_OFF_WIDTH, SIGNAL_OFF_HEIGHT, signal_off_bitmap);
+
 }
 
 // Updates all dynamic widgets from the shared data model. Cheap to call every
