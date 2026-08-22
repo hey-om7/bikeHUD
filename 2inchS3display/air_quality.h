@@ -3,8 +3,9 @@
  * Tripper Telemetry Dashboard V5
  *
  * Fetches elevation, UV index, and US AQI from the Open-Meteo Air Quality API
- * every 10 minutes. Uses a dummy GPS function that returns fixed coordinates
- * (to be replaced with real GPS data later).
+ * every 10 minutes, using the device's REAL GPS coordinates (from the NEO-7M).
+ * Until the GPS gets its first fix a fallback location is used so the widgets
+ * are not blank; the first real fix triggers an immediate refetch.
  *
  * All exposed values are integers:
  *   elevation -> altitude widget
@@ -20,6 +21,15 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
+// Real GPS fix (defined in main .ino, parsed in sensors.h).
+extern float gpsLat;
+extern float gpsLng;
+extern bool  gpsFix;
+
+// Fallback location used only until the first satellite fix arrives.
+#define AQ_FALLBACK_LAT  18.56f
+#define AQ_FALLBACK_LNG  73.941f
+
 // ===== Fetch Interval =====
 #define AQ_FETCH_INTERVAL_MS  (10UL * 60UL * 1000UL)  // 10 minutes
 
@@ -34,13 +44,20 @@ struct AirQualityData {
 static AirQualityData aqData = { 0, -1, -1, false };
 static unsigned long lastAqFetch = 0;
 static bool aqFirstFetchDone = false;
+static bool aqUsedRealFix = false;   // did the last fetch use a real GPS fix?
 
-// ===== Dummy GPS Function =====
-// Returns fixed coordinates for now. Replace the body with real GPS data later;
-// callers only depend on the two out-params.
-void getGPSCoordinates(float &latitude, float &longitude) {
-  latitude  = 18.56f;
-  longitude = 73.941f;
+// ===== Current GPS Coordinates =====
+// Fills lat/lng with the device's real GPS fix. Returns true if the fix is
+// valid; false (with fallback coordinates) if the module has no fix yet.
+bool getGPSCoordinates(float &latitude, float &longitude) {
+  if (gpsFix && (gpsLat != 0.0f || gpsLng != 0.0f)) {
+    latitude  = gpsLat;
+    longitude = gpsLng;
+    return true;
+  }
+  latitude  = AQ_FALLBACK_LAT;
+  longitude = AQ_FALLBACK_LNG;
+  return false;
 }
 
 // ===== Fetch Air Quality from Open-Meteo API =====
@@ -53,9 +70,11 @@ bool fetchAirQuality() {
   }
 
   float lat, lng;
-  getGPSCoordinates(lat, lng);
+  bool realFix = getGPSCoordinates(lat, lng);
+  Serial.printf("[AQ] Fetching for %s coords: %.4f, %.4f\n",
+                realFix ? "REAL GPS" : "FALLBACK (no fix yet)", lat, lng);
 
-  // Build request URL from the (dummy) GPS coordinates
+  // Build request URL from the current GPS coordinates
   char url[256];
   snprintf(url, sizeof(url),
     "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%.4f&longitude=%.4f&current=uv_index,us_aqi",
@@ -93,6 +112,7 @@ bool fetchAirQuality() {
     aqData.uvIndex   = (int) lroundf(doc["current"]["uv_index"].as<float>());
     aqData.usAqi     = doc["current"]["us_aqi"].as<int>();
     aqData.valid     = true;
+    aqUsedRealFix    = realFix;
 
     Serial.printf("[AQ] Fetched: elevation=%dm, UV=%d, AQI=%d\n",
       aqData.elevation, aqData.uvIndex, aqData.usAqi);
@@ -121,6 +141,17 @@ void airQualityLoop() {
         aqFirstFetchDone = true;
         lastAqFetch = now;
       }
+    }
+    return;
+  }
+
+  // Upgrade from fallback to real coordinates: if the first fetch used the
+  // fallback location and we've since acquired a real GPS fix, refetch now so
+  // the widgets reflect the rider's actual location without waiting 10 minutes.
+  if (!aqUsedRealFix && gpsFix && (gpsLat != 0.0f || gpsLng != 0.0f)) {
+    Serial.println("[AQ] Real GPS fix acquired - refetching for actual location");
+    if (fetchAirQuality()) {
+      lastAqFetch = now;
     }
     return;
   }

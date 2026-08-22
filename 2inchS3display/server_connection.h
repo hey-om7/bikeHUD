@@ -87,9 +87,9 @@ static NavChunk frameB;        // The frame we're interpolating TO
 static bool frameBReady = false;  // frameB has valid data to interpolate toward
 static bool frameAValid = false;  // frameA has been populated at least once
 
-// GPS Mock/Interface (development mode - dummy coordinates)
-static float deviceLat = 18.5534;   // Kharadi, Pune
-static float deviceLng = 73.9468;
+// GPS position (populated from real GPS via updateDeviceGPS)
+static float deviceLat = 0.0;
+static float deviceLng = 0.0;
 static bool gpsDataValid = false;
 
 // Forward declarations
@@ -98,8 +98,9 @@ void sendDeviceIdentify();
 void requestNextChunk(uint16_t nextIndex);
 void sendGpsUpdate();
 
-// Periodic GPS push cadence during navigation (drives closed-loop frames).
-#define NAV_GPS_PUSH_MS  600
+// GPS push cadence to the server.
+#define NAV_GPS_PUSH_MS   600     // fast push during navigation (drives frames)
+#define IDLE_GPS_PUSH_MS  5000    // slow push otherwise (keeps server location fresh)
 static unsigned long lastGpsPush = 0;
 
 // ===== WebSocket Event Handler =====
@@ -332,11 +333,14 @@ void serverConnectionLoop() {
   if (!serverModuleInitialized) return;
   wsClient.loop();
 
-  // While navigating with a live fix, push GPS periodically so the server can
-  // render position-matched frames (closed loop). No-op if GPS isn't valid.
-  if (navState == NAV_ACTIVE && serverState == SRV_CONNECTED && gpsDataValid) {
+  // Continuously report the current location to the server so it always has an
+  // up-to-date position. Push fast while navigating (drives the closed-loop
+  // position-matched frames), and slowly otherwise (keeps the server's known
+  // location fresh for the app / as the routing source). No-op without a fix.
+  if (serverState == SRV_CONNECTED && gpsDataValid) {
     unsigned long now = millis();
-    if (now - lastGpsPush >= NAV_GPS_PUSH_MS) {
+    unsigned long interval = (navState == NAV_ACTIVE) ? NAV_GPS_PUSH_MS : IDLE_GPS_PUSH_MS;
+    if (now - lastGpsPush >= interval) {
       sendGpsUpdate();
       lastGpsPush = now;
     }

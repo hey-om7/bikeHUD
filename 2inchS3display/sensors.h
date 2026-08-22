@@ -221,4 +221,78 @@ void parseNMEA(String line) {
   }
 }
 
+// ===== GPS Boot Diagnostic =====
+// Verifies the NEO-7M is wired correctly and talking on the UART. Reads for
+// `durationMs`, echoes the raw NMEA sentences, and reports whether data is
+// flowing and whether a satellite fix is already present. Call once in setup().
+void gpsBootDiagnostic(HardwareSerial &gps, uint32_t durationMs) {
+  Serial.printf("[GPS] Boot check on UART (RX=%d, TX=%d) for %lums...\n",
+                GPS_RX_PIN, GPS_TX_PIN, (unsigned long)durationMs);
+
+  unsigned long start = millis();
+  unsigned long byteCount = 0;
+  int sentenceCount = 0;
+  String line = "";
+
+  while (millis() - start < durationMs) {
+    while (gps.available()) {
+      char c = (char)gps.read();
+      byteCount++;
+      if (c == '\n') {
+        line.trim();
+        if (line.length() > 0) {
+          Serial.printf("[GPS] << %s\n", line.c_str());
+          parseNMEA(line);       // update globals if a fix is already present
+          sentenceCount++;
+        }
+        line = "";
+      } else if (c != '\r') {
+        if (line.length() < 120) line += c;  // guard against runaway lines
+      }
+    }
+  }
+
+  if (byteCount == 0) {
+    Serial.println("[GPS] ERROR: no data received on the UART.");
+    Serial.println("[GPS]   Check wiring:");
+    Serial.printf ("[GPS]     GPS TXD -> ESP GPIO %d (RX)\n", GPS_RX_PIN);
+    Serial.printf ("[GPS]     GPS RXD -> ESP GPIO %d (TX)\n", GPS_TX_PIN);
+    Serial.println("[GPS]     GPS VCC -> 3.3V,  GPS GND -> GND");
+    Serial.println("[GPS]   If TX/RX are swapped you get zero bytes.");
+  } else {
+    Serial.printf("[GPS] OK: module is talking (%lu bytes, %d NMEA sentences).\n",
+                  byteCount, sentenceCount);
+    if (gpsFix && (gpsLat != 0.0f || gpsLng != 0.0f)) {
+      Serial.printf("[GPS] Fix acquired at boot: lat=%.6f, lng=%.6f, sats=%d, alt=%.0fm\n",
+                    gpsLat, gpsLng, gpsSatellites, gpsAltitude);
+    } else {
+      Serial.println("[GPS] Module OK but no satellite fix yet.");
+      Serial.println("[GPS]   Needs a clear view of the sky; cold start ~30-45s.");
+    }
+  }
+}
+
+// ===== GPS Status Print (throttled) =====
+// Call from the main loop; prints the current fix at most once per intervalMs.
+void gpsPrintStatus(uint32_t intervalMs) {
+  static unsigned long lastPrint = 0;
+  static bool lastFix = false;
+  unsigned long now = millis();
+
+  // Print immediately the moment a fix is first acquired, then throttle.
+  bool fixJustAcquired = (gpsFix && !lastFix);
+  lastFix = gpsFix;
+
+  if (!fixJustAcquired && (now - lastPrint < intervalMs)) return;
+  lastPrint = now;
+
+  if (gpsFix && (gpsLat != 0.0f || gpsLng != 0.0f)) {
+    Serial.printf("[GPS] lat=%.6f, lng=%.6f | sats=%d | speed=%.1fkm/h | hdg=%.0f | alt=%.0fm%s\n",
+                  gpsLat, gpsLng, gpsSatellites, gpsSpeed, gpsHeading, gpsAltitude,
+                  fixJustAcquired ? "  <-- FIX ACQUIRED" : "");
+  } else {
+    Serial.printf("[GPS] no fix (sats=%d) - waiting for satellites...\n", gpsSatellites);
+  }
+}
+
 #endif // SENSORS_H

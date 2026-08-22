@@ -35,11 +35,11 @@ float pitchIncline = 0.0;
 float rollTilt = 0.0;
 float gpsAltitude = 1060.0;
 float gpsHeading = 0.0;
-float gpsLat = 18.5534;    // decimal degrees; overwritten by real GPS fix
-float gpsLng = 73.9468;    // decimal degrees; overwritten by real GPS fix
+float gpsLat = 0.0;         // decimal degrees; set by real GPS fix
+float gpsLng = 0.0;         // decimal degrees; set by real GPS fix
 float gpsSpeed = 0.0;      // ground speed, km/h
-int   gpsSatellites = 8;
-bool  gpsFix = true;
+int   gpsSatellites = 0;
+bool  gpsFix = false;
 bool  hotspotConnected = false;
 bool  sosArmed = true;
 bool  imuConnected = false;
@@ -78,6 +78,11 @@ void setup() {
 
   // Show splash screen
   showSplashScreen();
+
+  // GPS boot check: confirm the NEO-7M is wired correctly on pins 13/15 and
+  // print any coordinates it already has. Runs while the splash is visible.
+  gpsBootDiagnostic(gpsSerial, 2500);
+
   appState = STATE_SPLASH;
   stateStartTime = millis();
 }
@@ -190,6 +195,10 @@ void loop() {
       while (gpsSerial.available() > 0) {
         parseNMEA(gpsSerial.readStringUntil('\n'));
       }
+
+      // Print live GPS coordinates to the serial monitor (throttled to 5s,
+      // and immediately when a fix is first acquired).
+      gpsPrintStatus(5000);
 
       // Read IMU at 50Hz (gyro + accel complementary filter)
       if (imuConnected && (now - lastIMURead >= 20)) {

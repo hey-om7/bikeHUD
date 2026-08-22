@@ -21,8 +21,8 @@
 #define I2C_SCL    47
 
 // ===== GPS UART Pins (NEO-7M) =====
-#define GPS_RX_PIN 44
-#define GPS_TX_PIN 43
+#define GPS_RX_PIN 13
+#define GPS_TX_PIN 15
 
 // ===== QMI8658 IMU Registers =====
 #define QMI8658_ADDR      0x6B
