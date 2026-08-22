@@ -19,8 +19,8 @@
 #define DEVICE_ID  getDeviceId()
 
 // ===== Server Configuration =====
-#define SERVER_HOST       "192.168.100.100"  // Backend server on local network
-#define SERVER_PORT       3001
+#define SERVER_HOST       "bikehud.onrender.com"  // Production backend on Render
+#define SERVER_PORT       443
 #define SERVER_WS_PATH    "/device"
 
 // Reconnect interval (ms)
@@ -352,7 +352,7 @@ void sendGpsUpdate() {
 void initServerConnection() {
   if (serverModuleInitialized) return;
 
-  wsClient.begin(SERVER_HOST, SERVER_PORT, SERVER_WS_PATH);
+  wsClient.beginSSL(SERVER_HOST, SERVER_PORT, SERVER_WS_PATH);
   wsClient.onEvent(wsEvent);
   wsClient.setReconnectInterval(SERVER_RECONNECT_INTERVAL);
   // Heartbeat tuned to tolerate brief loop stalls (e.g. the synchronous air-
@@ -417,8 +417,8 @@ void promoteFrameB() {
   frameBReady = false;
 }
 
-// Advance to next chunk after current is rendered
-void advanceNavigation() {
+// Check if the current chunk signals navigation complete
+void checkNavComplete() {
   if (navState != NAV_ACTIVE) return;
   if (currentChunk.isLast) {
     // Navigation complete
@@ -432,12 +432,10 @@ void advanceNavigation() {
     char buf[128];
     serializeJson(doc, buf);
     wsClient.sendTXT(buf);
-  } else if (!gpsDataValid) {
-    // Dev/offline fallback ONLY: no live GPS, so walk the pre-baked frames
-    // sequentially. With a valid fix, frames are driven by GPS_UPDATE pushes
-    // from the server and we must NOT self-request (it would fight the push).
-    requestNextChunk(currentChunk.chunkIndex + 1);
   }
+  // No auto-advance: frames are driven exclusively by GPS_UPDATE pushes from
+  // the server. The device sends its real position, the server map-matches it
+  // onto the route and pushes back the correct frame.
 }
 
 // Clear navigation state (after NAV_COMPLETE acknowledged)

@@ -84,7 +84,6 @@ static int navPathThickness(int y) {
 
 static bool navDisplayActive = false;
 static unsigned long lastNavRender = 0;
-static unsigned long lastFrameAdvance = 0;
 
 // ===== Off-Screen Framebuffer (flicker-free rendering) =====
 // The ST7789 draws directly to the panel, so clearing + redrawing every frame
@@ -118,12 +117,13 @@ static void navCanvasFree() {
 }
 
 // ===== Smooth Animation Parameters =====
-// Duration (ms) to interpolate between two consecutive server frames.
-// Frames are sampled ~every 10m along the route, so this controls perceived speed.
+// Duration (ms) to interpolate between two consecutive GPS-driven server frames.
+// The server pushes a new frame every ~600ms (NAV_GPS_PUSH_MS cadence), so this
+// controls how smoothly the display transitions between those real-position frames.
 #define NAV_FRAME_DURATION_MS  700
 
 // Target render interval (~30fps). The display redraws the interpolated state
-// at this cadence for smooth, continuous road scrolling.
+// at this cadence for smooth visual transitions between server-pushed frames.
 #define NAV_RENDER_INTERVAL_MS  33
 
 // Interpolation state: tracks progress from frameA toward frameB.
@@ -488,7 +488,6 @@ void enterNavMode() {
   navDisplayActive = true;
   interpRunning = false;
   interpT = 0.0f;
-  lastFrameAdvance = millis();
   lastNavRender = 0;
 
   navCanvasInit();     // allocate the off-screen framebuffer
@@ -520,10 +519,11 @@ bool isNavDisplayActive() {
   return navDisplayActive;
 }
 
-// ===== Navigation Display Loop (Smooth Interpolation) =====
+// ===== Navigation Display Loop (GPS-Driven) =====
 // Called from main loop when navigation is active.
-// Instead of jumping between frames every 700ms, this continuously interpolates
-// path points from frameA to frameB at ~30fps, creating smooth road scrolling.
+// Frames are pushed by the server in response to GPS_UPDATE messages — the ESP
+// never auto-advances or self-requests the next chunk. Between server frames we
+// interpolate at ~30fps for a smooth visual transition.
 // Returns true if still in nav mode, false to return to dashboard.
 bool navDisplayLoop() {
   if (!navDisplayActive) return false;
@@ -536,6 +536,9 @@ bool navDisplayLoop() {
     if (hasNavigationChunk()) {
       getCurrentNavChunk();  // Marks as consumed; data already in frameA/B buffers
 
+      // Check if navigation is complete (destination reached)
+      checkNavComplete();
+
       // If we now have both frames, start (or restart) interpolation
       if (isFrameBReady()) {
         interpStartTime = now;
@@ -543,11 +546,11 @@ bool navDisplayLoop() {
         interpRunning = true;
       }
       else if (isFrameAValid() && !interpRunning) {
-        // Only frameA available (first frame ever) — render it static and request next
+        // Only frameA available (first frame ever) — render it static.
+        // No auto-request for next frame; the server will push when the next
+        // GPS_UPDATE arrives and map-matches to a new position.
         drawNavScreen(getFrameA());
         lastNavRender = now;
-        lastFrameAdvance = now;
-        advanceNavigation();  // Request frameB from server
       }
     }
 
@@ -557,18 +560,18 @@ bool navDisplayLoop() {
       interpT = (float)elapsed / (float)NAV_FRAME_DURATION_MS;
 
       if (interpT >= 1.0f) {
-        // Interpolation complete: snap to frameB, promote it, request next
+        // Interpolation complete: snap to frameB and promote it.
+        // Do NOT request next frame — it will arrive when the server processes
+        // the next GPS_UPDATE from our real position.
         interpT = 1.0f;
         drawNavScreen(getFrameB());
         lastNavRender = now;
 
-        // Promote frameB → frameA, clear frameB, request next chunk
+        // Promote frameB → frameA, clear frameB.
         promoteFrameB();
-        advanceNavigation();
-        lastFrameAdvance = now;
 
-        // If a new frameB arrived during this tick it'll start next iteration;
-        // otherwise we pause interpolation until the server responds.
+        // If a new frameB already arrived during this tick, start next cycle;
+        // otherwise pause interpolation until the server pushes the next frame.
         if (isFrameBReady()) {
           interpStartTime = now;
           interpT = 0.0f;
@@ -589,11 +592,8 @@ bool navDisplayLoop() {
       interpT = 0.0f;
       interpRunning = true;
     }
-    else if (!interpRunning && isFrameAValid() && (now - lastFrameAdvance >= NAV_FRAME_DURATION_MS)) {
-      // Stalled: no frameB arrived yet. Re-request.
-      advanceNavigation();
-      lastFrameAdvance = now;
-    }
+    // No stall-recovery / auto-request: if no frame arrives, we simply hold
+    // the last rendered frame until the GPS pushes trigger a new one.
   }
   else if (state == NAV_COMPLETE) {
     if (now - lastNavRender > 500) {
