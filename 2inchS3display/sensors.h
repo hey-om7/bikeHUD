@@ -13,6 +13,9 @@ extern float pitchIncline;
 extern float rollTilt;
 extern float gpsAltitude;
 extern float gpsHeading;
+extern float gpsLat;        // decimal degrees (real GPS fix)
+extern float gpsLng;        // decimal degrees (real GPS fix)
+extern float gpsSpeed;      // ground speed, km/h (from RMC)
 extern int   gpsSatellites;
 extern bool  gpsFix;
 extern bool  imuConnected;
@@ -151,25 +154,70 @@ const char* getCardinalDirection(float course) {
   return "-";
 }
 
+// Convert an NMEA "ddmm.mmmm" / "dddmm.mmmm" coordinate token + hemisphere
+// character into signed decimal degrees. Returns NAN on a malformed/empty token.
+static float nmeaToDecimal(const String &token, char hemi) {
+  if (token.length() < 3) return NAN;
+  int dotIdx = token.indexOf('.');
+  if (dotIdx < 3) return NAN;  // need at least dd + mm before the decimal
+  // Degrees are all digits before the last two whole-minute digits.
+  int degDigits = dotIdx - 2;
+  float deg = token.substring(0, degDigits).toFloat();
+  float minutes = token.substring(degDigits).toFloat();
+  float dec = deg + minutes / 60.0f;
+  if (hemi == 'S' || hemi == 'W') dec = -dec;
+  return dec;
+}
+
 void parseNMEA(String line) {
   if (line.startsWith("$GPGGA") || line.startsWith("$GNGGA")) {
+    // GGA fields: 2=lat, 3=N/S, 4=lng, 5=E/W, 6=fix, 7=sats, 9=altitude
     int tokenIdx = 0, start = 0, end = line.indexOf(',');
+    String latTok = "", lngTok = "";
+    char latHemi = 0, lngHemi = 0;
     while (end != -1) {
       String token = line.substring(start, end);
-      if (tokenIdx == 6) gpsFix = (token.toInt() > 0);
+      if (tokenIdx == 2) latTok = token;
+      else if (tokenIdx == 3 && token.length() > 0) latHemi = token[0];
+      else if (tokenIdx == 4) lngTok = token;
+      else if (tokenIdx == 5 && token.length() > 0) lngHemi = token[0];
+      else if (tokenIdx == 6) gpsFix = (token.toInt() > 0);
       else if (tokenIdx == 7) gpsSatellites = token.toInt();
       else if (tokenIdx == 9 && token.length() > 0) gpsAltitude = token.toFloat();
       tokenIdx++; start = end + 1; end = line.indexOf(',', start);
     }
+    if (gpsFix && latTok.length() > 0 && lngTok.length() > 0) {
+      float lat = nmeaToDecimal(latTok, latHemi);
+      float lng = nmeaToDecimal(lngTok, lngHemi);
+      if (!isnan(lat) && !isnan(lng)) { gpsLat = lat; gpsLng = lng; }
+    }
   } else if (line.startsWith("$GPRMC") || line.startsWith("$GNRMC")) {
+    // RMC fields: 2=status, 3=lat, 4=N/S, 5=lng, 6=E/W, 7=speed(kn), 8=course
     int tokenIdx = 0, start = 0, end = line.indexOf(',');
     float tempHeading = -1.0;
+    String latTok = "", lngTok = "";
+    char latHemi = 0, lngHemi = 0, status = 0;
     while (end != -1) {
       String token = line.substring(start, end);
-      if (tokenIdx == 8 && token.length() > 0) tempHeading = token.toFloat();
+      if (tokenIdx == 2 && token.length() > 0) status = token[0];  // 'A'=valid, 'V'=void
+      else if (tokenIdx == 3) latTok = token;
+      else if (tokenIdx == 4 && token.length() > 0) latHemi = token[0];
+      else if (tokenIdx == 5) lngTok = token;
+      else if (tokenIdx == 6 && token.length() > 0) lngHemi = token[0];
+      else if (tokenIdx == 7 && token.length() > 0) gpsSpeed = token.toFloat() * 1.852f;  // knots -> km/h
+      else if (tokenIdx == 8 && token.length() > 0) tempHeading = token.toFloat();
       tokenIdx++; start = end + 1; end = line.indexOf(',', start);
     }
-    if (tempHeading >= 0.0) gpsHeading = tempHeading;
+    if (status == 'A') {
+      gpsFix = true;
+      if (latTok.length() > 0 && lngTok.length() > 0) {
+        float lat = nmeaToDecimal(latTok, latHemi);
+        float lng = nmeaToDecimal(lngTok, lngHemi);
+        if (!isnan(lat) && !isnan(lng)) { gpsLat = lat; gpsLng = lng; }
+      }
+    }
+    // Course over ground is only meaningful when actually moving.
+    if (tempHeading >= 0.0 && gpsSpeed > 3.0f) gpsHeading = tempHeading;
   }
 }
 

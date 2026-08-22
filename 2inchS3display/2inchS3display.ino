@@ -35,6 +35,9 @@ float pitchIncline = 0.0;
 float rollTilt = 0.0;
 float gpsAltitude = 1060.0;
 float gpsHeading = 0.0;
+float gpsLat = 18.5534;    // decimal degrees; overwritten by real GPS fix
+float gpsLng = 73.9468;    // decimal degrees; overwritten by real GPS fix
+float gpsSpeed = 0.0;      // ground speed, km/h
 int   gpsSatellites = 8;
 bool  gpsFix = true;
 bool  hotspotConnected = false;
@@ -209,7 +212,9 @@ void loop() {
         if (hotspotConnected) {
           serverConnectionLoop();
           airQualityLoop();
-          updateDeviceGPS(deviceLat, deviceLng, gpsFix);
+          // Feed the REAL parsed GPS fix to the server connection layer so
+          // routing + closed-loop frame selection use the live position.
+          updateDeviceGPS(gpsLat, gpsLng, gpsFix);
         }
       }
 

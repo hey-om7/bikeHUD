@@ -13,6 +13,8 @@ import http from 'http';
 import { DeviceManager } from './modules/deviceManager.js';
 import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
+import { renderFrameAt } from './modules/frameRenderer.js';
+import { projectOntoRoute } from './modules/navigationEngine.js';
 
 const PORT = 3001;
 
@@ -68,6 +70,9 @@ function handleDeviceMessage(ws, msg) {
 
     case 'GPS_UPDATE':
       deviceManager.updateGPS(msg.deviceId, msg.lat, msg.lng, msg.valid);
+      // Closed loop: if the device is navigating and has a valid fix, render the
+      // frame for its real map-matched position and push it immediately.
+      if (msg.valid) handleLiveGpsFrame(ws, msg.deviceId, msg.lat, msg.lng);
       break;
 
     case 'REQUEST_CHUNK':
@@ -84,6 +89,47 @@ function handleDeviceMessage(ws, msg) {
 
     default:
       console.log(`[WS] Unknown message type: ${msg.type}`);
+  }
+}
+
+// ===== Closed-loop: render + push the frame for the device's live position =====
+// Called on every GPS_UPDATE while navigating. Map-matches the fix onto the
+// route, renders ONE frame at that position (heading smoothed across updates),
+// and pushes it. This is what makes the display track the real bike position
+// and speed instead of a fixed timer.
+function handleLiveGpsFrame(ws, deviceId, lat, lng) {
+  const session = deviceManager.getNavSession(deviceId);
+  if (!session || !session.route || !session.cum) return; // no closed-loop context
+
+  const geometry = session.route.geometry || [];
+  const cum = session.cum;
+  const total = cum[cum.length - 1] || 0;
+  if (geometry.length < 2 || total <= 0) return;
+
+  const match = projectOntoRoute(geometry, cum, lat, lng);
+
+  // Reject wild fixes that are nowhere near the route (keeps a bad GPS sample
+  // from yanking the view); the device keeps showing the last good frame.
+  if (match.offMeters > 60) return;
+
+  // Never step backwards along the route on noise; allow a small tolerance.
+  let d = match.distAlong;
+  if (d < session.lastDistAlong - 15) d = session.lastDistAlong;
+  session.lastDistAlong = d;
+
+  const { frame, heading } = renderFrameAt(session.route, cum, d, session.prevHeading);
+  session.prevHeading = heading;
+  session.liveSeq += 1;
+
+  frame.chunkIndex = session.liveSeq;
+  frame.totalChunks = 0;             // 0 => progress comes from `progress` field
+  frame.isLast = d >= total - 8;     // within 8 m of destination
+
+  sendToDevice(ws, frame);
+
+  if (frame.isLast) {
+    deviceManager.completeNavigation(deviceId);
+    console.log(`[NAV] Device ${deviceId} reached destination (live GPS)`);
   }
 }
 

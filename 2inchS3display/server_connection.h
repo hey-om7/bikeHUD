@@ -51,19 +51,21 @@ struct PathPoint {
 struct SidePath {
   PathPoint points[MAX_SIDE_PATH_POINTS];
   uint8_t count;
+  uint16_t id;              // stable per-road id (route.roads index) for frame matching
 };
 
 struct NavChunk {
-  uint8_t chunkIndex;
-  uint8_t totalChunks;
+  uint16_t chunkIndex;      // widened: routes emit far more than 255 frames
+  uint16_t totalChunks;     // 0 in live mode (use `progress` instead)
   char instruction[32];     // e.g. "Turn right", "Continue straight"
   char direction[4];        // "R", "L", "S", "U" (right, left, straight, u-turn)
   uint16_t distanceMeters;  // distance to next instruction
   int16_t bearing;          // 0-359 degrees
+  float progress;           // 0..1 fraction of route complete (authoritative)
   // Server-rendered smooth path (screen coordinates)
   PathPoint mainPath[MAX_MAIN_PATH_POINTS];
   uint8_t mainPathCount;
-  // Side roads (wrong-turn indicators)
+  // Surrounding roads (gray context)
   SidePath sidePaths[MAX_SIDE_PATHS];
   uint8_t sidePathCount;
   bool isLast;
@@ -93,7 +95,12 @@ static bool gpsDataValid = false;
 // Forward declarations
 void handleServerMessage(uint8_t *payload, size_t length);
 void sendDeviceIdentify();
-void requestNextChunk(uint8_t nextIndex);
+void requestNextChunk(uint16_t nextIndex);
+void sendGpsUpdate();
+
+// Periodic GPS push cadence during navigation (drives closed-loop frames).
+#define NAV_GPS_PUSH_MS  600
+static unsigned long lastGpsPush = 0;
 
 // ===== WebSocket Event Handler =====
 void wsEvent(WStype_t type, uint8_t *payload, size_t length) {
@@ -160,19 +167,23 @@ void handleServerMessage(uint8_t *payload, size_t length) {
   if (strcmp(msgType, "START_NAVIGATION") == 0) {
     navState = NAV_ACTIVE;
     hasNewChunk = false;
+    lastGpsPush = 0;  // force an immediate GPS push below
     Serial.println("[NAV] Navigation started by server command");
-    // Request the first chunk
+    // Request the first pre-baked chunk so something shows instantly, then
+    // push our live position so the server can start position-matched frames.
     requestNextChunk(0);
+    sendGpsUpdate();
   }
 
   // --- NAV_CHUNK: navigation data chunk (server-rendered paths) ---
   else if (strcmp(msgType, "NAV_CHUNK") == 0) {
     currentChunk.chunkIndex = doc["chunkIndex"] | 0;
-    currentChunk.totalChunks = doc["totalChunks"] | 1;
+    currentChunk.totalChunks = doc["totalChunks"] | 0;
     strlcpy(currentChunk.instruction, doc["instruction"] | "Continue", sizeof(currentChunk.instruction));
     strlcpy(currentChunk.direction, doc["direction"] | "S", sizeof(currentChunk.direction));
     currentChunk.distanceMeters = doc["distance"] | 0;
     currentChunk.bearing = doc["bearing"] | 0;
+    currentChunk.progress = doc["progress"] | 0.0f;
     currentChunk.isLast = doc["isLast"] | false;
 
     // Parse mainPath: array of [x, y] screen coordinates
@@ -191,11 +202,17 @@ void handleServerMessage(uint8_t *payload, size_t length) {
 
     // Parse sidePaths: array of arrays of [x, y]
     JsonArray sidePaths = doc["sidePaths"].as<JsonArray>();
+    // sideIds: parallel array of stable per-road ids (may be absent on old server)
+    JsonArray sideIds = doc["sideIds"].as<JsonArray>();
     currentChunk.sidePathCount = 0;
     if (sidePaths) {
       for (size_t s = 0; s < sidePaths.size() && s < MAX_SIDE_PATHS; s++) {
         JsonArray sp = sidePaths[s].as<JsonArray>();
         currentChunk.sidePaths[s].count = 0;
+        // Stable id lets the display interpolate the SAME physical road between
+        // frames. Fall back to the slot index if the server didn't send ids.
+        currentChunk.sidePaths[s].id = (sideIds && s < sideIds.size())
+          ? sideIds[s].as<uint16_t>() : (uint16_t)s;
         if (sp) {
           for (size_t p = 0; p < sp.size() && p < MAX_SIDE_PATH_POINTS; p++) {
             JsonArray pt = sp[p].as<JsonArray>();
@@ -262,8 +279,8 @@ void handleServerMessage(uint8_t *payload, size_t length) {
   }
 }
 
-// ===== Request Next Navigation Chunk =====
-void requestNextChunk(uint8_t nextIndex) {
+// ===== Request Next Navigation Chunk (pre-baked, dev/fallback path) =====
+void requestNextChunk(uint16_t nextIndex) {
   if (serverState != SRV_CONNECTED) return;
 
   JsonDocument doc;
@@ -272,6 +289,24 @@ void requestNextChunk(uint8_t nextIndex) {
   doc["chunkIndex"] = nextIndex;
 
   char buffer[128];
+  serializeJson(doc, buffer);
+  wsClient.sendTXT(buffer);
+}
+
+// ===== Push current GPS fix to the server =====
+// During navigation the server uses this to render a frame at the device's real
+// map-matched position (closed loop). Sent periodically from serverConnectionLoop.
+void sendGpsUpdate() {
+  if (serverState != SRV_CONNECTED) return;
+
+  JsonDocument doc;
+  doc["type"] = "GPS_UPDATE";
+  doc["deviceId"] = DEVICE_ID;
+  doc["lat"] = deviceLat;
+  doc["lng"] = deviceLng;
+  doc["valid"] = gpsDataValid;
+
+  char buffer[200];
   serializeJson(doc, buffer);
   wsClient.sendTXT(buffer);
 }
@@ -296,6 +331,16 @@ void initServerConnection() {
 void serverConnectionLoop() {
   if (!serverModuleInitialized) return;
   wsClient.loop();
+
+  // While navigating with a live fix, push GPS periodically so the server can
+  // render position-matched frames (closed loop). No-op if GPS isn't valid.
+  if (navState == NAV_ACTIVE && serverState == SRV_CONNECTED && gpsDataValid) {
+    unsigned long now = millis();
+    if (now - lastGpsPush >= NAV_GPS_PUSH_MS) {
+      sendGpsUpdate();
+      lastGpsPush = now;
+    }
+  }
 }
 
 // ===== Update GPS coordinates (called from GPS parser or mock) =====
@@ -343,7 +388,10 @@ void advanceNavigation() {
     char buf[128];
     serializeJson(doc, buf);
     wsClient.sendTXT(buf);
-  } else {
+  } else if (!gpsDataValid) {
+    // Dev/offline fallback ONLY: no live GPS, so walk the pre-baked frames
+    // sequentially. With a valid fix, frames are driven by GPS_UPDATE pushes
+    // from the server and we must NOT self-request (it would fight the push).
     requestNextChunk(currentChunk.chunkIndex + 1);
   }
 }

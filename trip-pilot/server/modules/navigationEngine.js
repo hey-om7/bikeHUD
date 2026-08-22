@@ -402,3 +402,55 @@ export function nearestVertexIndex(geometry, lng, lat) {
   }
   return best;
 }
+
+/**
+ * Map-match a GPS fix onto the route polyline.
+ *
+ * Projects (lat,lng) onto the nearest route segment and returns how far along
+ * the route that projection lies, plus the perpendicular off-route distance.
+ * Distances are computed in a local planar frame (longitude scaled by cos(lat))
+ * which is accurate for the short segments involved.
+ *
+ * @param {Array} geometry [[lng,lat], ...]
+ * @param {number[]} cum   cumulative distances for geometry
+ * @param {number} lat
+ * @param {number} lng
+ * @returns {{ distAlong: number, offMeters: number, segIndex: number }}
+ */
+export function projectOntoRoute(geometry, cum, lat, lng) {
+  if (!geometry || geometry.length < 2) {
+    return { distAlong: 0, offMeters: Infinity, segIndex: 0 };
+  }
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * cosLat;
+
+  // Point in local meters (origin at the GPS fix itself keeps numbers small).
+  const px = 0, py = 0;
+
+  let best = { distAlong: 0, offMeters: Infinity, segIndex: 0 };
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const [aLng, aLat] = geometry[i];
+    const [bLng, bLat] = geometry[i + 1];
+    const ax = (aLng - lng) * mPerDegLng, ay = (aLat - lat) * mPerDegLat;
+    const bx = (bLng - lng) * mPerDegLng, by = (bLat - lat) * mPerDegLat;
+    const dx = bx - ax, dy = by - ay;
+    const segLen2 = dx * dx + dy * dy;
+    let t = 0;
+    if (segLen2 > 1e-9) {
+      t = ((px - ax) * dx + (py - ay) * dy) / segLen2;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    const cxp = ax + dx * t, cyp = ay + dy * t;
+    const off = Math.hypot(cxp - px, cyp - py);
+    if (off < best.offMeters) {
+      const segLen = cum[i + 1] - cum[i];
+      best = {
+        distAlong: cum[i] + segLen * t,
+        offMeters: off,
+        segIndex: i
+      };
+    }
+  }
+  return best;
+}

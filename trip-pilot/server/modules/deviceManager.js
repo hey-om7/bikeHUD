@@ -79,13 +79,21 @@ export class DeviceManager {
     return result;
   }
 
-  // Start navigation session
-  startNavigation(deviceId, chunks) {
+  // Start navigation session.
+  // `frames` is the pre-baked frame sequence (preview + dev/offline fallback).
+  // `routeContext` = { route, cum } enables closed-loop, position-matched
+  // frame rendering driven by real device GPS updates.
+  startNavigation(deviceId, frames, routeContext = null) {
     const device = this.devices.get(deviceId);
     if (!device || !device.online) return false;
 
     device.navSession = {
-      chunks,
+      chunks: frames,
+      route: routeContext ? routeContext.route : null,
+      cum: routeContext ? routeContext.cum : null,
+      prevHeading: null,      // last smoothed heading (for temporal EMA)
+      lastDistAlong: 0,       // last map-matched distance (monotonic guard)
+      liveSeq: 0,             // monotonic index for pushed live frames
       startedAt: Date.now(),
       currentChunk: 0
     };

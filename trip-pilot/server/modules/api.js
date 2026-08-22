@@ -4,6 +4,7 @@
 
 import { Router } from 'express';
 import { buildFrames } from './frameRenderer.js';
+import { cumulativeDistances } from './navigationEngine.js';
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
@@ -172,9 +173,11 @@ export function createApiRouter(deviceManager, navEngine) {
         destLat, destLng
       );
       const frames = buildFrames(route);
+      const cum = cumulativeDistances(route.geometry || []);
 
-      // Start navigation on the device
-      const started = deviceManager.startNavigation(deviceId, frames);
+      // Start navigation on the device. Pass the route context so the server
+      // can render position-matched frames as real GPS updates arrive.
+      const started = deviceManager.startNavigation(deviceId, frames, { route, cum });
       if (!started) {
         return res.status(500).json({ error: 'Failed to send navigation command to device' });
       }

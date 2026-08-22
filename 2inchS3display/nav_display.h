@@ -150,19 +150,39 @@ static void lerpNavChunks(NavChunk* a, NavChunk* b, float t, NavChunk* out) {
     out->mainPath[i].y = (int16_t)(a->mainPath[i].y * invT + b->mainPath[i].y * t + 0.5f);
   }
 
-  // Side paths: lerp each side road's points (use min counts)
-  uint8_t sideCount = min(a->sidePathCount, b->sidePathCount);
-  out->sidePathCount = sideCount;
-  for (uint8_t s = 0; s < sideCount; s++) {
-    uint8_t ptCount = min(a->sidePaths[s].count, b->sidePaths[s].count);
-    out->sidePaths[s].count = ptCount;
-    for (uint8_t p = 0; p < ptCount; p++) {
-      out->sidePaths[s].points[p].x = (int16_t)(
-        a->sidePaths[s].points[p].x * invT + b->sidePaths[s].points[p].x * t + 0.5f);
-      out->sidePaths[s].points[p].y = (int16_t)(
-        a->sidePaths[s].points[p].y * invT + b->sidePaths[s].points[p].y * t + 0.5f);
+  // Side paths: match by STABLE ROAD ID so we interpolate the same physical
+  // road between frames instead of morphing unrelated roads into each other.
+  // For each road in A, find the same id in B and lerp; if it's not in B, keep
+  // A's geometry (it will simply drop out on the next promotion). Roads that are
+  // new in B appear when B is promoted — no cross-road sweeping.
+  uint8_t outSide = 0;
+  for (uint8_t sa = 0; sa < a->sidePathCount && outSide < MAX_SIDE_PATHS; sa++) {
+    // Locate the matching road in frame B by id.
+    int8_t mb = -1;
+    for (uint8_t sb = 0; sb < b->sidePathCount; sb++) {
+      if (b->sidePaths[sb].id == a->sidePaths[sa].id) { mb = sb; break; }
     }
+
+    out->sidePaths[outSide].id = a->sidePaths[sa].id;
+    if (mb >= 0) {
+      uint8_t ptCount = min(a->sidePaths[sa].count, b->sidePaths[mb].count);
+      out->sidePaths[outSide].count = ptCount;
+      for (uint8_t p = 0; p < ptCount; p++) {
+        out->sidePaths[outSide].points[p].x = (int16_t)(
+          a->sidePaths[sa].points[p].x * invT + b->sidePaths[mb].points[p].x * t + 0.5f);
+        out->sidePaths[outSide].points[p].y = (int16_t)(
+          a->sidePaths[sa].points[p].y * invT + b->sidePaths[mb].points[p].y * t + 0.5f);
+      }
+    } else {
+      // Road not present in B: hold A's geometry (no morphing to a stranger).
+      out->sidePaths[outSide].count = a->sidePaths[sa].count;
+      for (uint8_t p = 0; p < a->sidePaths[sa].count; p++) {
+        out->sidePaths[outSide].points[p] = a->sidePaths[sa].points[p];
+      }
+    }
+    outSide++;
   }
+  out->sidePathCount = outSide;
 
   // Metadata: snap direction/instruction at midpoint, lerp distance
   if (t < 0.5f) {
@@ -174,6 +194,7 @@ static void lerpNavChunks(NavChunk* a, NavChunk* b, float t, NavChunk* out) {
   }
   out->distanceMeters = (uint16_t)(a->distanceMeters * invT + b->distanceMeters * t + 0.5f);
   out->bearing = (int16_t)(a->bearing * invT + b->bearing * t + 0.5f);
+  out->progress = a->progress * invT + b->progress * t;
   out->chunkIndex = (t < 0.5f) ? a->chunkIndex : b->chunkIndex;
   out->totalChunks = a->totalChunks;  // Same for both
   out->isLast = b->isLast;
@@ -355,9 +376,12 @@ static void drawProgressArc(NavChunk* chunk) {
   int arcR_outer = 36;
   int arcR_inner = 32;
 
-  // Progress = current chunk / total
+  // Progress: prefer the authoritative `progress` field (0..1). Fall back to
+  // chunkIndex/totalChunks only for the legacy pre-baked path (totalChunks > 0).
   float progress = 0.0f;
-  if (chunk->totalChunks > 0) {
+  if (chunk->progress > 0.0f) {
+    progress = chunk->progress;
+  } else if (chunk->totalChunks > 0) {
     progress = (float)(chunk->chunkIndex) / (float)(chunk->totalChunks);
   }
   if (progress > 1.0f) progress = 1.0f;
