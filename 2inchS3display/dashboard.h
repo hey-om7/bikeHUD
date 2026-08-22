@@ -31,6 +31,7 @@
 #include "Inter_Black8pt.h"
 #include "signal_on.h"
 #include "signal_off.h"
+#include "server_connection.h"  // getServerState() / SRV_CONNECTED for the link icon
 
 extern Arduino_GFX *gfx;
 extern bool hotspotConnected;
@@ -237,6 +238,39 @@ void drawIconOverBackground(int16_t startX, int16_t startY, int16_t w, int16_t h
   gfx->draw16bitRGBBitmap(startX, startY, buffer, w, h);
 }
 
+// =========================================================================
+// SERVER LINK STATUS ICON
+// Shows signal_on while the WebSocket link to the navigation server is up,
+// and signal_off otherwise. Cheap to call every frame: it only touches the
+// screen when the connection state actually changes.
+// =========================================================================
+#define SIGNAL_ICON_X 120   // top-left corner where the link icon sits
+#define SIGNAL_ICON_Y 0
+
+// Last state we drew: -1 = nothing drawn yet, 0 = off, 1 = on.
+static int8_t lastSignalConnected = -1;
+
+void updateSignalIcon() {
+  bool connected = (getServerState() == SRV_CONNECTED);
+  if (lastSignalConnected == (int8_t)connected) return;  // unchanged -> skip
+
+  // The on/off art differ slightly in height, so clear the union of both
+  // footprints first to avoid leaving a stray row when switching.
+  int16_t clrW = max(SIGNAL_ON_WIDTH, SIGNAL_OFF_WIDTH);
+  int16_t clrH = max(SIGNAL_ON_HEIGHT, SIGNAL_OFF_HEIGHT);
+  restoreBackground(SIGNAL_ICON_X, SIGNAL_ICON_Y, clrW, clrH);
+
+  if (connected) {
+    drawIconOverBackground(SIGNAL_ICON_X, SIGNAL_ICON_Y,
+                           SIGNAL_ON_WIDTH, SIGNAL_ON_HEIGHT, signal_on_bitmap);
+  } else {
+    drawIconOverBackground(SIGNAL_ICON_X, SIGNAL_ICON_Y,
+                           SIGNAL_OFF_WIDTH, SIGNAL_OFF_HEIGHT, signal_off_bitmap);
+  }
+
+  lastSignalConnected = (int8_t)connected;
+}
+
 // Change-detecting update: redraws only if the value differs, restoring just
 // this widget's own previous footprint from the background image first.
 void updateValueWidget(ValueWidget &w, const String &text) {
@@ -270,6 +304,7 @@ void resetDashboardWidgets() {
   wUv.drawn    = false;
   wTemp.drawn  = false;
   wAlt.drawn   = false;
+  lastSignalConnected = -1;  // force the link icon to redraw after a bg repaint
 }
 
 // =========================================================================
@@ -303,9 +338,10 @@ void initDashboard() {
   // Format: gfx->draw16bitRGBBitmap(x, y, bitmap_array, width, height);
 
 
-  //Drawing icons for signal_on
-  drawIconOverBackground(5, 0, SIGNAL_ON_WIDTH, SIGNAL_ON_HEIGHT, signal_on_bitmap);
-  drawIconOverBackground(150, 0, SIGNAL_OFF_WIDTH, SIGNAL_OFF_HEIGHT, signal_off_bitmap);
+  drawIconOverBackground(0, 0, SIGNAL_OFF_WIDTH, SIGNAL_OFF_HEIGHT, signal_off_bitmap); 
+  //Draw the server link status icon (on if WebSocket connected, else off)
+  lastSignalConnected = -1;  // force a draw regardless of prior state
+  updateSignalIcon();
 
 }
 
@@ -343,6 +379,9 @@ void updateDashboard(const DashboardData &d) {
   char altBuf[16];
   snprintf(altBuf, sizeof(altBuf), "%d", (int)d.altitude);
   updateValueWidget(wAlt, altBuf);
+
+  // Server link status icon (redraws only when connection state flips)
+  updateSignalIcon();
 }
 
 #endif  // DASHBOARD_H
