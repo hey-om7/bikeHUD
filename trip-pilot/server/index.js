@@ -10,13 +10,18 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { DeviceManager } from './modules/deviceManager.js';
 import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
 import { renderFrameAt } from './modules/frameRenderer.js';
 import { projectOntoRoute } from './modules/navigationEngine.js';
 
-const PORT = 3001;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = process.env.PORT || 3001;
 
 const app = express();
 app.use(cors());
@@ -227,6 +232,15 @@ function registerSimulatedDevice() {
 }
 
 registerSimulatedDevice();
+
+// ===== Serve Built Frontend (production) =====
+// In production (Render), serve the Vite-built static files from ../dist.
+// All unmatched routes fall through to index.html for client-side routing.
+const distPath = path.join(__dirname, '..', 'dist');
+app.use(express.static(distPath));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
 // ===== Start Server =====
 server.listen(PORT, '0.0.0.0', () => {

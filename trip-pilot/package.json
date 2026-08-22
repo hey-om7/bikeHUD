@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "server": "node server/index.js & vite --open; kill $!",
+    "start": "node server/index.js",
     "build": "tsc -b && vite build",
+    "render-build": "npm install && cd server && npm install && cd .. && npm run build",
     "lint": "oxlint",
     "preview": "vite preview"
   },
