@@ -17,6 +17,10 @@ import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
 import { renderFrameAt } from './modules/frameRenderer.js';
 import { projectOntoRoute } from './modules/navigationEngine.js';
+import { connectDB } from './modules/db.js';
+import { createAuthRouter } from './modules/auth.js';
+import { createDevicePairingRouter, handleDeviceRegister } from './modules/devicePairing.js';
+import { Device } from './models/Device.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +90,25 @@ const wsKeepAlive = setInterval(() => {
 
 wss.on('close', () => clearInterval(wsKeepAlive));
 
+// ===== Check Device Pairing Status in DB =====
+// When a device connects and identifies itself, verify it's still paired in
+// the database. If the user unpaired it while the device was offline, send
+// DEVICE_UNPAIRED so it factory resets on next connection.
+async function checkDevicePairingStatus(ws, deviceId) {
+  try {
+    const device = await Device.findOne({ deviceId });
+    if (!device || device.paired === false) {
+      console.log(`[WS] Device ${deviceId} is unpaired in DB — sending DEVICE_UNPAIRED`);
+      sendToDevice(ws, {
+        type: 'DEVICE_UNPAIRED',
+        deviceId,
+      });
+    }
+  } catch (err) {
+    console.error('[WS] Error checking pairing status:', err.message);
+  }
+}
+
 // ===== Handle Device Messages =====
 function handleDeviceMessage(ws, msg) {
   switch (msg.type) {
@@ -97,6 +120,9 @@ function handleDeviceMessage(ws, msg) {
         gpsValid: msg.gpsValid
       });
       console.log(`[WS] Device identified: ${msg.deviceId} at (${msg.lat}, ${msg.lng})`);
+      // Check DB pairing status — if the device was unpaired while offline,
+      // tell it to factory reset now that it's back online.
+      checkDevicePairingStatus(ws, msg.deviceId);
       break;
 
     case 'GPS_UPDATE':
@@ -116,6 +142,10 @@ function handleDeviceMessage(ws, msg) {
         sendToDevice(ws, { type: 'NAV_COMPLETE' });
         console.log(`[NAV] Device ${msg.deviceId} completed navigation`);
       }
+      break;
+
+    case 'DEVICE_REGISTER':
+      handleDeviceRegister(ws, msg, sendToDevice, deviceManager);
       break;
 
     default:
@@ -197,6 +227,8 @@ function sendToDevice(ws, msg) {
 
 // ===== REST API Routes =====
 app.use('/api', createApiRouter(deviceManager, navEngine));
+app.use('/api/auth', createAuthRouter());
+app.use('/api/devices', createDevicePairingRouter(deviceManager));
 
 // ===== Health Check =====
 app.get('/health', (req, res) => {
@@ -243,8 +275,13 @@ app.get('*', (req, res) => {
 });
 
 // ===== Start Server =====
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Trip Pilot running on port ${PORT}`);
-  console.log(`[Server] Device WebSocket: ws://0.0.0.0:${PORT}/device`);
-  console.log(`[Server] API: http://0.0.0.0:${PORT}/api`);
-});
+async function start() {
+  await connectDB();
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Trip Pilot running on port ${PORT}`);
+    console.log(`[Server] Device WebSocket: ws://0.0.0.0:${PORT}/device`);
+    console.log(`[Server] API: http://0.0.0.0:${PORT}/api`);
+  });
+}
+
+start();

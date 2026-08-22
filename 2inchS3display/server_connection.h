@@ -13,12 +13,15 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
+#include "device_pairing.h"
+
+// Use the MAC-derived device ID from device_pairing.h
+#define DEVICE_ID  getDeviceId()
 
 // ===== Server Configuration =====
 #define SERVER_HOST       "192.168.100.100"  // Backend server on local network
 #define SERVER_PORT       3001
 #define SERVER_WS_PATH    "/device"
-#define DEVICE_ID         "tripper-001"
 
 // Reconnect interval (ms)
 #define SERVER_RECONNECT_INTERVAL  5000
@@ -114,7 +117,15 @@ void wsEvent(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_CONNECTED:
       serverState = SRV_CONNECTED;
       Serial.printf("[WS] Connected to server %s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_WS_PATH);
-      sendDeviceIdentify();
+      if (!isDevicePaired()) {
+        // Not paired yet — register and request a pairing code
+        char regMsg[128];
+        buildRegisterMessage(regMsg, sizeof(regMsg));
+        wsClient.sendTXT(regMsg);
+        Serial.println("[WS] Sent DEVICE_REGISTER (awaiting pairing code)");
+      } else {
+        sendDeviceIdentify();
+      }
       break;
 
     case WStype_TEXT:
@@ -277,6 +288,30 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     char buf[200];
     serializeJson(resp, buf);
     wsClient.sendTXT(buf);
+  }
+
+  // --- PAIRING_CODE: server assigned a pairing code for this device ---
+  else if (strcmp(msgType, "PAIRING_CODE") == 0) {
+    const char* code = doc["pairingCode"];
+    if (code) {
+      onPairingCodeReceived(code);
+    }
+  }
+
+  // --- DEVICE_PAIRED: user has paired this device via the app ---
+  else if (strcmp(msgType, "DEVICE_PAIRED") == 0) {
+    onDevicePaired();
+    // Now identify ourselves properly for navigation use
+    sendDeviceIdentify();
+  }
+
+  // --- DEVICE_UNPAIRED: user unpaired this device from the app ---
+  else if (strcmp(msgType, "DEVICE_UNPAIRED") == 0) {
+    Serial.println("[WS] Device unpaired by user — resetting...");
+    clearPairingState();
+    clearCredentials();
+    delay(500);
+    ESP.restart();
   }
 }
 

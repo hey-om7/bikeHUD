@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { MapContainer, TileLayer, Marker, useMapEvents, useMap } from 'react-leaflet'
+import { useNavigate } from 'react-router-dom'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
+import { useAuth } from './context/AuthContext'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
-const DEVICE_ID = 'tripper-001'
 const DEFAULT_CENTER: [number, number] = [18.5534, 73.9468] // Kharadi, Pune
 
 // Fix default marker icons for Leaflet + bundler
@@ -103,6 +104,10 @@ function FlyToDest({ lat, lng }: { lat: number | null; lng: number | null }) {
 }
 
 function App() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const DEVICE_ID = user?.devices?.[0]?.deviceId || 'tripper-001'
+
   const [device, setDevice] = useState<DeviceStatus | null>(null)
   const [destLat, setDestLat] = useState<number | null>(null)
   const [destLng, setDestLng] = useState<number | null>(null)
@@ -276,7 +281,14 @@ function App() {
     <div className="app">
       {/* Device Status Bar */}
       <header className="status-bar">
-        <div className="brand">TRIPPER</div>
+        <div className="status-bar-left">
+          <button className="status-bar-back" onClick={() => navigate('/')} aria-label="Back to menu">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+          <div className="brand">TRIPPER</div>
+        </div>
         <div className="status-group">
           {device?.online && (
             <div className={`gps-status ${hasFix ? 'fixed' : 'searching'}`}>

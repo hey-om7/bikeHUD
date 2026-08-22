@@ -21,6 +21,7 @@
 #include "air_quality.h"
 #include "dashboard.h"
 #include "nav_display.h"
+#include "device_pairing.h"
 
 // ===== Display Setup =====
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
@@ -56,6 +57,8 @@ HardwareSerial gpsSerial(1);
 // Application state machine
 enum AppState {
   STATE_SPLASH,
+  STATE_WIFI_SETUP,
+  STATE_PAIRING,
   STATE_DASHBOARD
 };
 
@@ -63,6 +66,8 @@ AppState appState = STATE_SPLASH;
 unsigned long stateStartTime = 0;
 bool splashAPStarted = false;
 int lastProgressDrawn = -1;
+bool pairingScreenShown = false;
+bool wifiSetupScreenShown = false;
 
 // ===== Setup =====
 void setup() {
@@ -75,6 +80,9 @@ void setup() {
   digitalWrite(LCD_BL, HIGH);
 
   gfx->begin();
+
+  // Generate unique device ID from MAC address
+  generateDeviceId();
 
   // Show splash screen
   showSplashScreen();
@@ -183,7 +191,77 @@ void loop() {
         // STA connects in background if credentials exist
         wifiConcurrentStart();
 
-        // Go straight to dashboard
+        // Check if device is already paired AND has WiFi creds
+        if (isDevicePaired() && hasStoredCredentials()) {
+          // Already paired with WiFi — go straight to dashboard
+          goToDashboard();
+        } else if (!hasStoredCredentials()) {
+          // No WiFi credentials — show WiFi setup screen first
+          showProvisioningScreen();
+          appState = STATE_WIFI_SETUP;
+          stateStartTime = millis();
+          wifiSetupScreenShown = true;
+        } else {
+          // Has WiFi but not paired — go to pairing (WiFi will connect in bg)
+          showWaitingForPairingScreen();
+          appState = STATE_PAIRING;
+          stateStartTime = millis();
+          pairingScreenShown = false;
+        }
+      }
+      break;
+    }
+
+    // --- WIFI_SETUP: Show WiFi provisioning screen, wait for user to enter creds ---
+    case STATE_WIFI_SETUP: {
+      // Keep WiFi manager running (handles AP portal + STA connection)
+      hotspotConnected = wifiManagerLoop();
+
+      // Once WiFi is connected, transition to pairing (or dashboard if already paired)
+      if (hotspotConnected) {
+        showConnectedScreen();
+        delay(1500);
+
+        if (isDevicePaired()) {
+          // Already paired — go to dashboard
+          goToDashboard();
+        } else {
+          // WiFi connected, now register with server for pairing
+          showWaitingForPairingScreen();
+          appState = STATE_PAIRING;
+          stateStartTime = millis();
+          pairingScreenShown = false;
+        }
+      }
+      break;
+    }
+
+    // --- PAIRING: WiFi is connected, register with server, show QR/code, wait for pair ---
+    case STATE_PAIRING: {
+      // Keep WiFi manager running
+      hotspotConnected = wifiManagerLoop();
+
+      // Start server connection once WiFi is up
+      if (hotspotConnected && !serverConnectionStarted) {
+        initServerConnection();
+        serverConnectionStarted = true;
+      }
+
+      // Keep WebSocket alive
+      if (serverConnectionStarted && hotspotConnected) {
+        serverConnectionLoop();
+      }
+
+      // Once we receive the pairing code from server, show the pairing screen
+      if (isPairingCodeReady() && !pairingScreenShown) {
+        showPairingScreen(pairingCode);
+        pairingScreenShown = true;
+      }
+
+      // Once paired, show success and transition to dashboard
+      if (isDevicePairedConfirmed()) {
+        showPairedSuccessScreen();
+        delay(2000);
         goToDashboard();
       }
       break;

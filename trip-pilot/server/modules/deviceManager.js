@@ -51,6 +51,11 @@ export class DeviceManager {
     return this.devices.get(deviceId);
   }
 
+  getDeviceSocket(deviceId) {
+    const device = this.devices.get(deviceId);
+    return device ? device.ws : null;
+  }
+
   getDeviceStatus(deviceId) {
     const device = this.devices.get(deviceId);
     if (!device) return null;
