@@ -108,12 +108,12 @@ void wsEvent(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
       serverState = SRV_DISCONNECTED;
-      Serial.println("[WS] Disconnected from server");
+      Serial.println("[WS] Disconnected from server (will auto-reconnect)");
       break;
 
     case WStype_CONNECTED:
       serverState = SRV_CONNECTED;
-      Serial.println("[WS] Connected to server");
+      Serial.printf("[WS] Connected to server %s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_WS_PATH);
       sendDeviceIdentify();
       break;
 
@@ -122,14 +122,14 @@ void wsEvent(WStype_t type, uint8_t *payload, size_t length) {
       break;
 
     case WStype_PING:
-      // Handled automatically by library
+      // Library auto-replies with PONG. Reset nothing here.
       break;
 
     case WStype_PONG:
       break;
 
     case WStype_ERROR:
-      Serial.println("[WS] Error");
+      Serial.printf("[WS] Error (len=%u)\n", (unsigned)length);
       break;
 
     default:
@@ -320,7 +320,12 @@ void initServerConnection() {
   wsClient.begin(SERVER_HOST, SERVER_PORT, SERVER_WS_PATH);
   wsClient.onEvent(wsEvent);
   wsClient.setReconnectInterval(SERVER_RECONNECT_INTERVAL);
-  wsClient.enableHeartbeat(15000, 3000, 2);
+  // Heartbeat tuned to tolerate brief loop stalls (e.g. the synchronous air-
+  // quality HTTP fetch). ping every 20s, allow 12s for the pong, and require
+  // 3 consecutive misses before dropping. The old 3s/2-miss setting dropped the
+  // link whenever a blocking call briefly starved wsClient.loop().
+  //   enableHeartbeat(pingInterval, pongTimeout, disconnectTimeoutCount)
+  wsClient.enableHeartbeat(20000, 12000, 3);
 
   serverModuleInitialized = true;
   serverState = SRV_CONNECTING;

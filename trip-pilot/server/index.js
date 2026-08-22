@@ -33,8 +33,15 @@ const navEngine = new NavigationEngine();
 // ===== WebSocket Server for ESP32 devices =====
 const wss = new WebSocketServer({ server, path: '/device' });
 
+// Mark a socket alive when it answers our ping.
+function markAlive() { this.isAlive = true; }
+
 wss.on('connection', (ws) => {
   console.log('[WS] New device connection');
+
+  // Keepalive bookkeeping (see the interval below).
+  ws.isAlive = true;
+  ws.on('pong', markAlive);
 
   ws.on('message', (data) => {
     try {
@@ -45,15 +52,34 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     deviceManager.handleDisconnect(ws);
-    console.log('[WS] Device disconnected');
+    console.log(`[WS] Device disconnected (code=${code}${reason && reason.length ? ', ' + reason : ''})`);
   });
 
   ws.on('error', (err) => {
     console.error('[WS] Error:', err.message);
   });
 });
+
+// Server-side keepalive: ping every device every 25s and terminate any that
+// missed the previous ping. This keeps the connection alive through WiFi/NAT
+// idle timeouts and cleanly reaps half-open sockets (the other half of fixing
+// the "randomly disconnects" problem — the device also heartbeats us).
+const WS_PING_INTERVAL_MS = 25000;
+const wsKeepAlive = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log('[WS] Terminating unresponsive device connection');
+      deviceManager.handleDisconnect(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (e) { /* socket already closing */ }
+  });
+}, WS_PING_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(wsKeepAlive));
 
 // ===== Handle Device Messages =====
 function handleDeviceMessage(ws, msg) {

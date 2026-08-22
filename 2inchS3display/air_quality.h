@@ -82,7 +82,8 @@ bool fetchAirQuality() {
 
   HTTPClient http;
   http.begin(url);
-  http.setTimeout(10000);  // 10 second timeout
+  http.setConnectTimeout(4000);
+  http.setTimeout(5000);   // keep this short: it blocks wsClient.loop() while in flight
 
   int httpCode = http.GET();
 
