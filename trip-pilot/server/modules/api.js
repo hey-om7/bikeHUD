@@ -177,7 +177,11 @@ export function createApiRouter(deviceManager, navEngine) {
 
       // Start navigation on the device. Pass the route context so the server
       // can render position-matched frames as real GPS updates arrive.
-      const started = deviceManager.startNavigation(deviceId, frames, { route, cum });
+      const started = deviceManager.startNavigation(deviceId, frames, { route, cum }, {
+        summary: route.summary,
+        destLat,
+        destLng
+      });
       if (!started) {
         return res.status(500).json({ error: 'Failed to send navigation command to device' });
       }
@@ -266,6 +270,16 @@ export function createApiRouter(deviceManager, navEngine) {
       console.error('[API] Geo data generation error:', e);
       res.status(500).json({ error: 'Failed to generate geographic data' });
     }
+  });
+
+  // GET /api/device/:id/navigation - get active navigation state for frontend recovery
+  // Returns summary, destination, and timing so the UI can resume after a page reload.
+  router.get('/device/:id/navigation', (req, res) => {
+    const info = deviceManager.getNavInfo(req.params.id);
+    if (!info) {
+      return res.json({ navigating: false });
+    }
+    res.json(info);
   });
 
   // POST /api/navigate/stop - stop navigation

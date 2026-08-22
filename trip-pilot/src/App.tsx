@@ -130,7 +130,25 @@ function App() {
         if (res.ok) {
           const data = await res.json()
           setDevice(data)
-          if (data.navigating) setNavigating(true)
+          if (data.navigating) {
+            setNavigating(true)
+            // Recover navigation state if we don't have it locally (page reload)
+            if (!navSummary) {
+              try {
+                const navRes = await fetch(`${API_BASE}/api/device/${DEVICE_ID}/navigation`)
+                if (navRes.ok) {
+                  const navData = await navRes.json()
+                  if (navData.navigating) {
+                    if (navData.summary) setNavSummary(navData.summary)
+                    if (navData.destLat != null && navData.destLng != null) {
+                      setDestLat(navData.destLat)
+                      setDestLng(navData.destLng)
+                    }
+                  }
+                }
+              } catch { /* ignore recovery failure */ }
+            }
+          }
           else if (navigating && !data.navigating) {
             setNavigating(false)
             setNavSummary(null)
@@ -147,7 +165,7 @@ function App() {
     poll()
     const interval = setInterval(poll, 3000)
     return () => clearInterval(interval)
-  }, [navigating])
+  }, [navigating, navSummary])
 
   // Close suggestions when clicking outside
   useEffect(() => {

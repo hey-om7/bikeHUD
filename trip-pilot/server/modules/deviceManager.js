@@ -90,7 +90,8 @@ export class DeviceManager {
   // `frames` is the pre-baked frame sequence (preview + dev/offline fallback).
   // `routeContext` = { route, cum } enables closed-loop, position-matched
   // frame rendering driven by real device GPS updates.
-  startNavigation(deviceId, frames, routeContext = null) {
+  // `meta` = { summary, destLat, destLng } persists info for frontend recovery.
+  startNavigation(deviceId, frames, routeContext = null, meta = null) {
     const device = this.devices.get(deviceId);
     if (!device || !device.online) return false;
 
@@ -102,7 +103,11 @@ export class DeviceManager {
       lastDistAlong: 0,       // last map-matched distance (monotonic guard)
       liveSeq: 0,             // monotonic index for pushed live frames
       startedAt: Date.now(),
-      currentChunk: 0
+      currentChunk: 0,
+      // Persisted for frontend state recovery on reconnect/reload
+      summary: meta ? meta.summary : null,
+      destLat: meta ? meta.destLat : null,
+      destLng: meta ? meta.destLng : null
     };
 
     // Send START_NAVIGATION command to device
@@ -116,6 +121,21 @@ export class DeviceManager {
   getNavSession(deviceId) {
     const device = this.devices.get(deviceId);
     return device ? device.navSession : null;
+  }
+
+  // Return navigation metadata for frontend state recovery.
+  // Returns null if not navigating.
+  getNavInfo(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.navSession) return null;
+    const s = device.navSession;
+    return {
+      navigating: true,
+      summary: s.summary || null,
+      destLat: s.destLat ?? null,
+      destLng: s.destLng ?? null,
+      startedAt: s.startedAt
+    };
   }
 
   completeNavigation(deviceId) {
