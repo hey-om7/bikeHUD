@@ -66,16 +66,28 @@ function MapClickHandler({ onMapClick, disabled }: { onMapClick: (lat: number, l
   return null
 }
 
-// ===== Fly to position =====
-function FlyTo({ lat, lng }: { lat: number; lng: number }) {
+// ===== Follow the device's live GPS position =====
+// On the first valid GPS fix, centers the map on the device at a low zoom then
+// smoothly zooms in — a subtle "here you are" animation. After that it gently
+// pans to keep the device in view as it moves.
+function FollowDevice({ pos, enabled }: { pos: [number, number] | null; enabled: boolean }) {
   const map = useMap()
-  const flown = useRef(false)
+  const didInitialZoom = useRef(false)
   useEffect(() => {
-    if (!flown.current && lat && lng) {
-      map.flyTo([lat, lng], 14, { duration: 1 })
-      flown.current = true
+    if (!pos || !enabled) return
+    if (!didInitialZoom.current) {
+      // Immediately set the map to the device position at a wide zoom, then
+      // smoothly zoom in — gives a subtle "locating you" feel without flying
+      // across from an unrelated city.
+      map.setView(pos, 12, { animate: false })
+      setTimeout(() => {
+        map.flyTo(pos, 16, { duration: 1.5 })
+      }, 200)
+      didInitialZoom.current = true
+    } else {
+      map.panTo(pos, { animate: true, duration: 0.5 })
     }
-  }, [map, lat, lng])
+  }, [map, pos, enabled])
   return null
 }
 
@@ -249,36 +261,56 @@ function App() {
     setNavSummary(null)
   }
 
-  const center: [number, number] = device
-    ? [device.lat, device.lng]
-    : DEFAULT_CENTER
+  // The device position is only trustworthy once the GPS has a valid fix.
+  // Until then we don't place a marker or recenter (avoids showing a fake
+  // location such as the server's Pune fallback).
+  const hasFix = !!(device && device.online && device.gpsValid &&
+                    (device.lat !== 0 || device.lng !== 0))
+  const devicePos: [number, number] | null = hasFix ? [device!.lat, device!.lng] : null
+  const center: [number, number] = devicePos ?? DEFAULT_CENTER
+  // Follow the rider when we have a fix and the user isn't mid-selecting a
+  // destination (during navigation we keep following).
+  const followEnabled = hasFix && (navigating || destLat === null)
 
   return (
     <div className="app">
       {/* Device Status Bar */}
       <header className="status-bar">
         <div className="brand">TRIPPER</div>
-        <div className={`device-status ${device?.online ? 'online' : 'offline'}`}>
-          <span className="dot" />
-          {device?.online ? 'Connected' : 'Offline'}
+        <div className="status-group">
+          {device?.online && (
+            <div className={`gps-status ${hasFix ? 'fixed' : 'searching'}`}>
+              <span className="dot" />
+              {hasFix ? 'GPS' : 'GPS…'}
+            </div>
+          )}
+          <div className={`device-status ${device?.online ? 'online' : 'offline'}`}>
+            <span className="dot" />
+            {device?.online ? 'Connected' : 'Offline'}
+          </div>
         </div>
       </header>
 
       {/* Map */}
       <div className="map-container">
-        <MapContainer center={center} zoom={15} zoomControl={false} attributionControl={false}>
+        <MapContainer center={center} zoom={hasFix ? 12 : 13} zoomControl={false} attributionControl={false}>
           <TileLayer
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             maxZoom={19}
           />
           <MapClickHandler onMapClick={handleMapClick} disabled={navigating} />
-          <FlyTo lat={center[0]} lng={center[1]} />
+          <FollowDevice pos={devicePos} enabled={followEnabled} />
           <FlyToDest lat={destLat} lng={destLng} />
-          {device && <Marker position={[device.lat, device.lng]} icon={defaultIcon} />}
+          {devicePos && <Marker position={devicePos} icon={defaultIcon} />}
           {destLat !== null && destLng !== null && (
             <Marker position={[destLat, destLng]} icon={destIcon} />
           )}
         </MapContainer>
+
+        {/* Waiting-for-fix hint */}
+        {device?.online && !hasFix && (
+          <div className="gps-wait-banner">Waiting for GPS fix…</div>
+        )}
 
         {/* Search with autocomplete dropdown */}
         {!navigating && (

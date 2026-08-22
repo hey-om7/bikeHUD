@@ -13,8 +13,10 @@ export class DeviceManager {
   registerDevice(ws, { deviceId, lat, lng, gpsValid }) {
     this.devices.set(deviceId, {
       ws,
-      lat: lat || 18.5534,
-      lng: lng || 73.9468,
+      // Preserve 0/valid numbers as-is; only fall back when truly missing.
+      // (Using `lat || default` wrongly turned a 0.0 pre-fix value into Pune.)
+      lat: (typeof lat === 'number') ? lat : 18.5534,
+      lng: (typeof lng === 'number') ? lng : 73.9468,
       gpsValid: gpsValid || false,
       online: true,
       lastSeen: Date.now(),

@@ -89,6 +89,71 @@ body {
   color: var(--text-dim);
 }
 
+/* GPS fix indicator (next to the connection badge) */
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gps-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.gps-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.gps-status.fixed {
+  color: var(--green);
+}
+
+.gps-status.fixed .dot {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.gps-status.searching {
+  color: var(--accent);
+}
+
+.gps-status.searching .dot {
+  background: var(--accent);
+  animation: gps-blink 1s ease-in-out infinite;
+}
+
+@keyframes gps-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* Waiting-for-fix banner overlaid on the map */
+.gps-wait-banner {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
 /* ===== Map ===== */
 .map-container {
   flex: 1 1 auto;
