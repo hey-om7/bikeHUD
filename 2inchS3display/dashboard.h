@@ -36,6 +36,7 @@
 extern Arduino_GFX *gfx;
 extern bool hotspotConnected;
 extern bool sosArmed;
+extern int gpsSatellites;
 
 // Text color for all dynamic values. Backgrounds are no longer painted as a
 // solid color: each widget restores the real background image underneath, so
@@ -271,6 +272,49 @@ void updateSignalIcon() {
   lastSignalConnected = (int8_t)connected;
 }
 
+// =========================================================================
+// GPS SIGNAL STRENGTH DOTS (top-right corner)
+// 4 circles: orange filled = good signal, light grey filled = weak/no signal.
+// Strength is derived from gpsSatellites:
+//   0-1 sats -> 0 dots,  2-3 -> 1 dot,  4-5 -> 2 dots,  6-7 -> 3 dots,  8+ -> 4 dots
+// =========================================================================
+#define GPS_DOT_RADIUS   4
+#define GPS_DOT_SPACING  14
+#define GPS_DOT_Y        7      // vertical center of the dots
+#define GPS_DOT_RIGHT_PAD 10     // space from right screen edge
+#define GPS_DOT_COLOR_ON  0xFDA0 // Orange (same NAV_ACCENT from nav_display)
+#define GPS_DOT_COLOR_OFF 0x94B2 // Light grey (RGB565 for ~200,200,200)
+
+static int8_t lastGpsStrength = -1;  // -1 = not drawn yet
+
+void updateGPSDots() {
+  // Map satellite count to 0..4 filled dots
+  int8_t strength = 0;
+  if (gpsSatellites >= 8)      strength = 4;
+  else if (gpsSatellites >= 6) strength = 3;
+  else if (gpsSatellites >= 4) strength = 2;
+  else if (gpsSatellites >= 2) strength = 1;
+
+  if (strength == lastGpsStrength) return;  // unchanged -> skip
+
+  // Rightmost dot X, then space them leftward
+  int startX = SCREEN_W - GPS_DOT_RIGHT_PAD - GPS_DOT_RADIUS;
+
+  for (int i = 3; i >= 0; i--) {
+    int cx = startX - (3 - i) * GPS_DOT_SPACING;
+    // Restore the background behind this dot first (prevents colour stacking)
+    restoreBackground(cx - GPS_DOT_RADIUS - 1, GPS_DOT_Y - GPS_DOT_RADIUS - 1,
+                      GPS_DOT_RADIUS * 2 + 2, GPS_DOT_RADIUS * 2 + 2);
+    if (i < strength) {
+      gfx->fillCircle(cx, GPS_DOT_Y, GPS_DOT_RADIUS, GPS_DOT_COLOR_ON);
+    } else {
+      gfx->fillCircle(cx, GPS_DOT_Y, GPS_DOT_RADIUS, GPS_DOT_COLOR_OFF);
+    }
+  }
+
+  lastGpsStrength = strength;
+}
+
 // Change-detecting update: redraws only if the value differs, restoring just
 // this widget's own previous footprint from the background image first.
 void updateValueWidget(ValueWidget &w, const String &text) {
@@ -305,6 +349,7 @@ void resetDashboardWidgets() {
   wTemp.drawn  = false;
   wAlt.drawn   = false;
   lastSignalConnected = -1;  // force the link icon to redraw after a bg repaint
+  lastGpsStrength = -1;      // force GPS dots to redraw after a bg repaint
 }
 
 // =========================================================================
@@ -342,6 +387,10 @@ void initDashboard() {
   //Draw the server link status icon (on if WebSocket connected, else off)
   lastSignalConnected = -1;  // force a draw regardless of prior state
   updateSignalIcon();
+
+  // Draw GPS signal strength dots (top-right)
+  lastGpsStrength = -1;
+  updateGPSDots();
 
 }
 
@@ -382,6 +431,9 @@ void updateDashboard(const DashboardData &d) {
 
   // Server link status icon (redraws only when connection state flips)
   updateSignalIcon();
+
+  // GPS signal strength dots (redraws only when strength bracket changes)
+  updateGPSDots();
 }
 
 #endif  // DASHBOARD_H
