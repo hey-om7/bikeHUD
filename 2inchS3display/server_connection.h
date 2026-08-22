@@ -15,7 +15,7 @@
 #include "config.h"
 
 // ===== Server Configuration =====
-#define SERVER_HOST       "192.168.1.100"  // Backend server on local network
+#define SERVER_HOST       "192.168.100.100"  // Backend server on local network
 #define SERVER_PORT       3001
 #define SERVER_WS_PATH    "/device"
 #define DEVICE_ID         "tripper-001"

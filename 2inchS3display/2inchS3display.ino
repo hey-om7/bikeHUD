@@ -53,15 +53,11 @@ HardwareSerial gpsSerial(1);
 // Application state machine
 enum AppState {
   STATE_SPLASH,
-  STATE_RECONNECTING,
-  STATE_PROVISIONING,
   STATE_DASHBOARD
 };
 
 AppState appState = STATE_SPLASH;
 unsigned long stateStartTime = 0;
-unsigned long lastWifiRetry = 0;
-bool portalScreenShown = false;
 bool splashAPStarted = false;
 int lastProgressDrawn = -1;
 
@@ -85,7 +81,6 @@ void setup() {
 
 // ===== Transition to dashboard =====
 void goToDashboard() {
-  hotspotConnected = true;
   imuConnected = qmi8658_init();
   lastIMURead = millis();  // Prevent huge dt on first imu_update call
   initDashboard();
@@ -113,7 +108,7 @@ void loop() {
 
       unsigned long elapsed = now - stateStartTime;
 
-      // Draw progress bar (updates every ~3% to avoid flicker)
+      // Draw progress bar incrementally (only the new portion each frame)
       int progress = (elapsed * 100) / 3000;  // 0-100 over 3 seconds
       if (progress > 100) progress = 100;
       if (progress != lastProgressDrawn) {
@@ -122,13 +117,28 @@ void loop() {
         int barW = 240;
         int barH = 6;
         int barR = 3;
-        int fillW = (barW * progress) / 100;
 
-        // Bar background
-        gfx->fillRoundRect(barX, barY, barW, barH, barR, 0x3186);
-        // Bar fill (orange accent)
-        if (fillW > 0) {
-          gfx->fillRoundRect(barX, barY, fillW, barH, barR, COL_ORANGE);
+        // Draw background track only once on first frame
+        if (lastProgressDrawn < 0) {
+          gfx->fillRoundRect(barX, barY, barW, barH, barR, 0x3186);
+        }
+
+        // Only draw the new pixels since last update (incremental fill)
+        int prevFillW = (lastProgressDrawn > 0) ? (barW * lastProgressDrawn) / 100 : 0;
+        int currFillW = (barW * progress) / 100;
+        if (currFillW > prevFillW && currFillW > 0) {
+          int newX = barX + prevFillW;
+          int newW = currFillW - prevFillW;
+          // Use full rounded rect only for the first segment, plain rect after
+          if (prevFillW == 0) {
+            gfx->fillRoundRect(barX, barY, currFillW, barH, barR, 0xFFE0);
+          } else {
+            gfx->fillRect(newX, barY, newW, barH, 0xFFE0);
+            // Redraw right rounded cap for smooth leading edge
+            if (currFillW >= barR) {
+              gfx->fillRoundRect(barX + currFillW - barR, barY, barR, barH, barR, 0xFFE0);
+            }
+          }
         }
         lastProgressDrawn = progress;
       }
@@ -154,61 +164,18 @@ void loop() {
         return; // Never reached
       }
 
-      // After 3 seconds, stop AP and proceed normally
+      // After 3 seconds, stop reset-window AP and start concurrent WiFi
       if (elapsed >= 3000) {
         WiFi.softAPdisconnect(true);
         WiFi.mode(WIFI_OFF);
         splashAPStarted = false;
         delay(50);
 
-        if (hasStoredCredentials()) {
-          showReconnectingScreen();
-          appState = STATE_RECONNECTING;
-          stateStartTime = now;
-        } else {
-          startProvisioningAP();
-          showProvisioningScreen();
-          appState = STATE_PROVISIONING;
-          stateStartTime = now;
-          portalScreenShown = false;
-        }
-      }
-      break;
-    }
+        // Start AP+STA concurrently: hotspot always available,
+        // STA connects in background if credentials exist
+        wifiConcurrentStart();
 
-    // --- RECONNECTING: Try stored credentials at boot ---
-    case STATE_RECONNECTING:
-      if (connectWithStoredCredentials()) {
-        goToDashboard();
-      } else {
-        // Load stored creds into staSSID/staPass for background retry
-        loadCredentials(staSSID, staPass);
-        // Go to dashboard anyway - will keep retrying in background
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(staSSID.c_str(), staPass.c_str());
-        goToDashboard();
-      }
-      break;
-
-    // --- PROVISIONING: AP running, serving portal, waiting for creds ---
-    case STATE_PROVISIONING: {
-      ProvisionState ps = provisioningLoop();
-
-      // Show portal URL once a client connects
-      if (ps == PROV_CLIENT_CONNECTED && !portalScreenShown) {
-        showPortalReadyScreen();
-        portalScreenShown = true;
-      }
-
-      // User submitted WiFi credentials via the web form
-      if (ps == PROV_CREDS_RECEIVED) {
-        // Save credentials immediately and go to dashboard
-        saveCredentials(staSSID, staPass);
-        // Stop AP and start STA mode
-        stopProvisioningAP();
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(staSSID.c_str(), staPass.c_str());
-        // Go straight to dashboard - WiFi connects in background
+        // Go straight to dashboard
         goToDashboard();
       }
       break;
@@ -228,14 +195,8 @@ void loop() {
         lastIMURead = now;
       }
 
-      // WiFi: check status, retry in background if disconnected
-      hotspotConnected = (WiFi.status() == WL_CONNECTED);
-      if (!hotspotConnected && (now - lastWifiRetry >= 5000)) {
-        // Silently retry connection in background
-        WiFi.disconnect();
-        WiFi.begin(staSSID.c_str(), staPass.c_str());
-        lastWifiRetry = now;
-      }
+      // WiFi manager: handles AP portal, STA connection, reconnect, all non-blocking
+      hotspotConnected = wifiManagerLoop();
 
       // --- Server connection: start after WiFi connects (background, non-blocking) ---
       if (hotspotConnected && !serverConnectionStarted) {
@@ -244,10 +205,12 @@ void loop() {
         serverConnectionStarted = true;
       }
       if (serverConnectionStarted) {
-        serverConnectionLoop();
-        airQualityLoop();
-        // Update server with GPS data (development: dummy coords)
-        updateDeviceGPS(deviceLat, deviceLng, gpsFix);
+        // If WiFi dropped, pause server comms (they'll resume when reconnected)
+        if (hotspotConnected) {
+          serverConnectionLoop();
+          airQualityLoop();
+          updateDeviceGPS(deviceLat, deviceLng, gpsFix);
+        }
       }
 
       // --- Navigation mode handling ---

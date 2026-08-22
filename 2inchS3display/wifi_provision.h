@@ -1,6 +1,13 @@
 /*
- * wifi_provision.h - WiFi AP mode, DNS captive portal, HTTP server
+ * wifi_provision.h - WiFi AP+STA concurrent mode, DNS captive portal, HTTP server
  * Tripper Telemetry Dashboard V5
+ *
+ * Strategy:
+ *   - After splash, always start AP+STA simultaneously.
+ *   - If stored credentials exist, begin STA connection in background.
+ *   - When STA connects, shut down AP (hotspot) and portal.
+ *   - If STA disconnects later (during dashboard), restart AP for re-provisioning.
+ *   - If new credentials arrive via portal, save them and attempt STA connection.
  */
 #ifndef WIFI_PROVISION_H
 #define WIFI_PROVISION_H
@@ -31,7 +38,16 @@ static String staSSID = "";
 static String staPass = "";
 static unsigned long connectStartTime = 0;
 
-// Check if WiFi credentials are already stored
+// Track whether AP portal is currently active
+static bool apPortalActive = false;
+// Track whether STA connection attempt is in progress
+static bool staConnecting = false;
+// Retry interval for STA reconnection
+static unsigned long lastStaRetry = 0;
+static const unsigned long STA_RETRY_INTERVAL = 5000;  // 5 seconds
+
+// ===== NVS Credential Management =====
+
 bool hasStoredCredentials() {
   prefs.begin("tripper", true);
   String ssid = prefs.getString("ssid", "");
@@ -39,7 +55,6 @@ bool hasStoredCredentials() {
   return ssid.length() > 0;
 }
 
-// Load stored credentials
 bool loadCredentials(String &ssid, String &pass) {
   prefs.begin("tripper", true);
   ssid = prefs.getString("ssid", "");
@@ -48,7 +63,6 @@ bool loadCredentials(String &ssid, String &pass) {
   return ssid.length() > 0;
 }
 
-// Save credentials to NVS
 void saveCredentials(const String &ssid, const String &pass) {
   prefs.begin("tripper", false);
   prefs.putString("ssid", ssid);
@@ -56,14 +70,14 @@ void saveCredentials(const String &ssid, const String &pass) {
   prefs.end();
 }
 
-// Clear stored credentials
 void clearCredentials() {
   prefs.begin("tripper", false);
   prefs.clear();
   prefs.end();
 }
 
-// HTTP handlers
+// ===== HTTP Handlers =====
+
 void handleRoot() {
   server.send(200, "text/html", PORTAL_HTML);
 }
@@ -72,9 +86,7 @@ void handleConnect() {
   if (server.hasArg("ssid") && server.hasArg("pass")) {
     staSSID = server.arg("ssid");
     staPass = server.arg("pass");
-    // Respond immediately so the browser gets feedback
     server.send(200, "application/json", "{\"success\":true}");
-    // Mark that credentials were received - main loop will handle connection
     provState = PROV_CREDS_RECEIVED;
   } else {
     server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing fields\"}");
@@ -86,9 +98,14 @@ void handleNotFound() {
   server.send(302, "text/plain", "");
 }
 
-// Start the AP and web server
+// ===== AP Portal Control =====
+
+// Start AP and captive portal (keeps STA running if already active)
 void startProvisioningAP() {
-  WiFi.mode(WIFI_AP);
+  if (apPortalActive) return;  // Already running
+
+  // Use AP_STA so STA stays connected/connecting in background
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(100);
 
@@ -101,62 +118,125 @@ void startProvisioningAP() {
   server.onNotFound(handleNotFound);
   server.begin();
 
+  apPortalActive = true;
   provState = PROV_AP_STARTED;
+  Serial.println("[WiFi] AP portal started (AP_STA mode)");
 }
 
-// Stop AP and all services
+// Stop AP and portal services, switch to STA-only
 void stopProvisioningAP() {
+  if (!apPortalActive) return;
+
   dnsServer.stop();
   server.stop();
   WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+
+  apPortalActive = false;
+  Serial.println("[WiFi] AP portal stopped, STA-only mode");
 }
 
-// Non-blocking provisioning poll
-// Returns the current state - caller handles transitions
-ProvisionState provisioningLoop() {
-  dnsServer.processNextRequest();
-  server.handleClient();
+// ===== Concurrent WiFi Management =====
 
-  // Detect client connection to AP
-  if (provState == PROV_AP_STARTED && WiFi.softAPgetStationNum() > 0) {
-    provState = PROV_CLIENT_CONNECTED;
+// Initialize WiFi after splash: start AP + begin STA if creds exist
+void wifiConcurrentStart() {
+  // Always start AP portal first
+  startProvisioningAP();
+
+  // If we have stored credentials, kick off STA connection in background
+  if (loadCredentials(staSSID, staPass)) {
+    WiFi.begin(staSSID.c_str(), staPass.c_str());
+    staConnecting = true;
+    connectStartTime = millis();
+    Serial.printf("[WiFi] Attempting STA connection to: %s\n", staSSID.c_str());
+  }
+}
+
+// Start STA connection attempt (non-blocking, AP stays up)
+void beginStaConnection() {
+  if (staSSID.length() == 0) return;
+
+  // Ensure we're in AP_STA mode
+  if (!apPortalActive) {
+    WiFi.mode(WIFI_STA);
+  }
+  WiFi.begin(staSSID.c_str(), staPass.c_str());
+  staConnecting = true;
+  connectStartTime = millis();
+  lastStaRetry = millis();
+  Serial.printf("[WiFi] STA connecting to: %s\n", staSSID.c_str());
+}
+
+// Non-blocking WiFi management loop - call from main loop()
+// Handles: portal requests, STA connection monitoring, auto-reconnect
+// Returns true if STA is connected
+bool wifiManagerLoop() {
+  unsigned long now = millis();
+  bool staConnected = (WiFi.status() == WL_CONNECTED);
+
+  // Service AP portal if active
+  if (apPortalActive) {
+    dnsServer.processNextRequest();
+    server.handleClient();
+
+    // Track client connections to AP
+    if (provState == PROV_AP_STARTED && WiFi.softAPgetStationNum() > 0) {
+      provState = PROV_CLIENT_CONNECTED;
+    }
+
+    // New credentials received from portal
+    if (provState == PROV_CREDS_RECEIVED) {
+      saveCredentials(staSSID, staPass);
+      beginStaConnection();
+      provState = PROV_CONNECTING;
+    }
   }
 
+  // STA just connected - shut down AP
+  if (staConnected && apPortalActive) {
+    stopProvisioningAP();
+    staConnecting = false;
+    provState = PROV_SUCCESS;
+    Serial.printf("[WiFi] STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
+  }
+
+  // STA disconnected while we thought it was connected - restart AP
+  if (!staConnected && !apPortalActive && !staConnecting) {
+    Serial.println("[WiFi] STA lost, restarting AP portal");
+    startProvisioningAP();
+    // Begin reconnection attempts
+    if (staSSID.length() > 0) {
+      WiFi.begin(staSSID.c_str(), staPass.c_str());
+      staConnecting = true;
+      connectStartTime = now;
+      lastStaRetry = now;
+    }
+  }
+
+  // STA connecting timeout - retry periodically (AP stays up)
+  if (staConnecting && !staConnected) {
+    if (now - lastStaRetry >= STA_RETRY_INTERVAL) {
+      WiFi.disconnect();
+      delay(50);
+      WiFi.begin(staSSID.c_str(), staPass.c_str());
+      lastStaRetry = now;
+      Serial.println("[WiFi] STA retry...");
+    }
+  }
+
+  return staConnected;
+}
+
+// Check if AP portal is currently running
+bool isAPPortalActive() {
+  return apPortalActive;
+}
+
+ProvisionState getProvisionState() {
   return provState;
 }
 
-// Start connecting to the user-provided WiFi (non-blocking start)
-void startStaConnection() {
-  // Switch to AP+STA so we keep serving until connected
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(staSSID.c_str(), staPass.c_str());
-  connectStartTime = millis();
-  provState = PROV_CONNECTING;
-}
-
-// Poll STA connection status (non-blocking)
-// Returns: 0 = still trying, 1 = connected, -1 = failed/timeout
-int pollStaConnection() {
-  if (WiFi.status() == WL_CONNECTED) {
-    saveCredentials(staSSID, staPass);
-    stopProvisioningAP();
-    WiFi.mode(WIFI_STA);
-    provState = PROV_SUCCESS;
-    return 1;
-  }
-  if (millis() - connectStartTime > 12000) {
-    // Timeout - failed
-    WiFi.disconnect();
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS);
-    dnsServer.start(53, "*", WiFi.softAPIP());
-    provState = PROV_FAILED;
-    return -1;
-  }
-  return 0;  // still trying
-}
-
-// Try connecting with stored credentials (blocking, for boot)
+// Legacy compatibility: blocking connect (used nowhere now, kept for reference)
 bool connectWithStoredCredentials() {
   String ssid, pass;
   if (!loadCredentials(ssid, pass)) return false;
@@ -172,10 +252,6 @@ bool connectWithStoredCredentials() {
 
   WiFi.disconnect();
   return false;
-}
-
-ProvisionState getProvisionState() {
-  return provState;
 }
 
 #endif // WIFI_PROVISION_H
