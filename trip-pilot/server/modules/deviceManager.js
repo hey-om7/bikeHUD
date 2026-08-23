@@ -11,29 +11,54 @@ export class DeviceManager {
   }
 
   registerDevice(ws, { deviceId, lat, lng, gpsValid }) {
-    this.devices.set(deviceId, {
-      ws,
-      // Preserve 0/valid numbers as-is; only fall back when truly missing.
-      // (Using `lat || default` wrongly turned a 0.0 pre-fix value into Pune.)
-      lat: (typeof lat === 'number') ? lat : 18.5534,
-      lng: (typeof lng === 'number') ? lng : 73.9468,
-      gpsValid: gpsValid || false,
-      online: true,
-      lastSeen: Date.now(),
-      navSession: null
-    });
+    const existing = this.devices.get(deviceId);
+    // Whether the identify/register payload carries a real position. A no-fix
+    // ESP sends (0,0); don't let that wipe a previously known/browser-pushed
+    // location (same guard as updateGPS).
+    const hasCoords = (typeof lat === 'number' && typeof lng === 'number' &&
+                       (lat !== 0 || lng !== 0));
+
+    if (existing) {
+      // Reconnect / re-identify: swap in the new socket and refresh liveness,
+      // but PRESERVE any in-flight navigation session and last known position.
+      // Rebuilding the object here (the old behaviour) dropped navSession and
+      // reset coords on every reconnect.
+      if (existing.ws && existing.ws !== ws) {
+        this.wsToDevice.delete(existing.ws); // retire the stale socket mapping
+      }
+      existing.ws = ws;
+      existing.online = true;
+      existing.lastSeen = Date.now();
+      existing.gpsValid = gpsValid || false;
+      if (hasCoords) { existing.lat = lat; existing.lng = lng; }
+    } else {
+      this.devices.set(deviceId, {
+        ws,
+        // Preserve 0/valid numbers as-is; only fall back when truly missing.
+        // (Using `lat || default` wrongly turned a 0.0 pre-fix value into Pune.)
+        lat: (typeof lat === 'number') ? lat : 18.5534,
+        lng: (typeof lng === 'number') ? lng : 73.9468,
+        gpsValid: gpsValid || false,
+        online: true,
+        lastSeen: Date.now(),
+        navSession: null
+      });
+    }
     this.wsToDevice.set(ws, deviceId);
   }
 
   handleDisconnect(ws) {
     const deviceId = this.wsToDevice.get(ws);
-    if (deviceId) {
-      const device = this.devices.get(deviceId);
-      if (device) {
-        device.online = false;
-        device.ws = null;
-      }
-      this.wsToDevice.delete(ws);
+    this.wsToDevice.delete(ws);
+    if (!deviceId) return;
+    const device = this.devices.get(deviceId);
+    // Only mark the device offline if THIS socket is still its active socket.
+    // Guards against a delayed close event from a previous connection knocking
+    // a freshly reconnected device offline (the ESP shows "connected" but the
+    // server wrongly reported "offline").
+    if (device && device.ws === ws) {
+      device.online = false;
+      device.ws = null;
     }
   }
 
