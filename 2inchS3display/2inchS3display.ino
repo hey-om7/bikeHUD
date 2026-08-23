@@ -40,6 +40,7 @@ float gpsLat = 0.0;         // decimal degrees; set by real GPS fix
 float gpsLng = 0.0;         // decimal degrees; set by real GPS fix
 float gpsSpeed = 0.0;      // ground speed, km/h
 int   gpsSatellites = 0;
+int   gpsSatsInView = 0;
 bool  gpsFix = false;
 bool  hotspotConnected = false;
 bool  sosArmed = true;
@@ -72,7 +73,13 @@ bool wifiSetupScreenShown = false;
 // ===== Setup =====
 void setup() {
   Serial.begin(115200);
+  // Enlarge the UART RX buffer BEFORE begin() so a full second of NMEA
+  // (multiple GGA/RMC/GSV/GSA sentences ~500-800 bytes at 9600 baud) can be
+  // held between drains without overflowing the default 256-byte buffer.
+  gpsSerial.setRxBufferSize(2048);
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  // Keep any stream reads from blocking the loop for up to a second.
+  gpsSerial.setTimeout(10);
   Wire.begin(I2C_SDA, I2C_SCL, 400000);
   Serial.printf("[I2C] Bus on SDA=%d, SCL=%d\n", I2C_SDA, I2C_SCL);
 
@@ -107,6 +114,12 @@ void goToDashboard() {
 // ===== Main Loop =====
 void loop() {
   unsigned long now = millis();
+
+  // Drain the GPS UART every iteration, in EVERY state. Non-blocking. This
+  // keeps the RX buffer from overflowing during the (potentially long) WiFi
+  // setup / pairing phase, so the module's fix data is live and correct the
+  // moment the dashboard opens.
+  gpsPump(gpsSerial);
 
   switch (appState) {
 
@@ -269,10 +282,7 @@ void loop() {
 
     // --- DASHBOARD: Normal telemetry operation ---
     case STATE_DASHBOARD:
-      // Process GPS
-      while (gpsSerial.available() > 0) {
-        parseNMEA(gpsSerial.readStringUntil('\n'));
-      }
+      // GPS is drained by gpsPump() at the top of loop(), in every state.
 
       // Print live GPS coordinates to the serial monitor (throttled to 5s,
       // and immediately when a fix is first acquired).

@@ -16,7 +16,8 @@ extern float gpsHeading;
 extern float gpsLat;        // decimal degrees (real GPS fix)
 extern float gpsLng;        // decimal degrees (real GPS fix)
 extern float gpsSpeed;      // ground speed, km/h (from RMC)
-extern int   gpsSatellites;
+extern int   gpsSatellites;    // satellites USED in the fix (from GGA)
+extern int   gpsSatsInView;    // satellites IN VIEW (from GSV) - signal strength
 extern bool  gpsFix;
 extern bool  imuConnected;
 
@@ -218,6 +219,39 @@ void parseNMEA(String line) {
     }
     // Course over ground is only meaningful when actually moving.
     if (tempHeading >= 0.0 && gpsSpeed > 3.0f) gpsHeading = tempHeading;
+  } else if (line.indexOf("GSV") == 3 && line.startsWith("$")) {
+    // GSV = satellites in view (talker can be GP/GL/GA/GN...).
+    // Field 3 (0-indexed) = total number of satellites in view.
+    // This is available DURING acquisition, before a fix exists, so it drives
+    // the on-screen signal-strength indicator instead of the GGA "sats used"
+    // field which stays 0 until a full fix is achieved.
+    int tokenIdx = 0, start = 0, end = line.indexOf(',');
+    while (end != -1) {
+      String token = line.substring(start, end);
+      if (tokenIdx == 3 && token.length() > 0) { gpsSatsInView = token.toInt(); break; }
+      tokenIdx++; start = end + 1; end = line.indexOf(',', start);
+    }
+  }
+}
+
+// ===== Non-blocking GPS Pump =====
+// Drains whatever bytes are currently in the UART RX buffer, assembling full
+// NMEA lines and parsing each one. Never blocks: it only consumes bytes that
+// have already arrived. Call this EVERY loop iteration in EVERY app state so
+// the RX buffer never overflows and the fix stays current the instant the
+// dashboard appears.
+void gpsPump(HardwareSerial &gps) {
+  static String line = "";
+  while (gps.available()) {
+    char c = (char)gps.read();
+    if (c == '\n') {
+      line.trim();
+      if (line.length() > 0) parseNMEA(line);
+      line = "";
+    } else if (c != '\r') {
+      if (line.length() < 120) line += c;   // guard against runaway lines
+      else line = "";                        // corrupt/overlong -> resync
+    }
   }
 }
 
@@ -291,7 +325,8 @@ void gpsPrintStatus(uint32_t intervalMs) {
                   gpsLat, gpsLng, gpsSatellites, gpsSpeed, gpsHeading, gpsAltitude,
                   fixJustAcquired ? "  <-- FIX ACQUIRED" : "");
   } else {
-    Serial.printf("[GPS] no fix (sats=%d) - waiting for satellites...\n", gpsSatellites);
+    Serial.printf("[GPS] no fix (used=%d, in view=%d) - waiting for satellites...\n",
+                  gpsSatellites, gpsSatsInView);
   }
 }
 

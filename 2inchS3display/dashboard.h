@@ -37,6 +37,7 @@ extern Arduino_GFX *gfx;
 extern bool hotspotConnected;
 extern bool sosArmed;
 extern int gpsSatellites;
+extern int gpsSatsInView;
 
 // Text color for all dynamic values. Backgrounds are no longer painted as a
 // solid color: each widget restores the real background image underneath, so
@@ -275,7 +276,10 @@ void updateSignalIcon() {
 // =========================================================================
 // GPS SIGNAL STRENGTH DOTS (top-right corner)
 // 4 circles: orange filled = good signal, light grey filled = weak/no signal.
-// Strength is derived from gpsSatellites:
+// Strength is derived from satellites IN VIEW (GSV), so the dots fill up during
+// acquisition - before a position fix exists - giving real "is it seeing sky"
+// feedback. (GGA "satellites used" stays 0 until a full fix, which looked like
+// permanent no-signal.)
 //   0-1 sats -> 0 dots,  2-3 -> 1 dot,  4-5 -> 2 dots,  6-7 -> 3 dots,  8+ -> 4 dots
 // =========================================================================
 #define GPS_DOT_RADIUS   4
@@ -288,12 +292,16 @@ void updateSignalIcon() {
 static int8_t lastGpsStrength = -1;  // -1 = not drawn yet
 
 void updateGPSDots() {
+  // Prefer satellites in view (available during acquisition); fall back to
+  // satellites used if a fix is already contributing more.
+  int sats = max(gpsSatsInView, gpsSatellites);
+
   // Map satellite count to 0..4 filled dots
   int8_t strength = 0;
-  if (gpsSatellites >= 8)      strength = 4;
-  else if (gpsSatellites >= 6) strength = 3;
-  else if (gpsSatellites >= 4) strength = 2;
-  else if (gpsSatellites >= 2) strength = 1;
+  if (sats >= 8)      strength = 4;
+  else if (sats >= 6) strength = 3;
+  else if (sats >= 4) strength = 2;
+  else if (sats >= 2) strength = 1;
 
   if (strength == lastGpsStrength) return;  // unchanged -> skip
 
