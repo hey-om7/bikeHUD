@@ -1010,3 +1010,124 @@ body {
 .status-bar-back:active {
   background: var(--surface-hover);
 }
+
+
+
+/* ===== Home Page - Device Status & GPS ===== */
+.home-device-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.home-device-badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.home-device-badge.online {
+  background: rgba(43, 224, 48, 0.1);
+  color: var(--green);
+}
+
+.home-device-badge.online .home-device-badge-dot {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.home-device-badge.offline {
+  background: rgba(138, 143, 158, 0.1);
+  color: var(--text-dim);
+}
+
+.home-device-badge.offline .home-device-badge-dot {
+  background: var(--text-dim);
+}
+
+.home-status-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.home-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.home-gps-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.home-gps-badge.fixed {
+  color: var(--green);
+  background: rgba(43, 224, 48, 0.08);
+}
+
+.home-gps-badge.searching {
+  color: var(--accent);
+  background: rgba(255, 140, 0, 0.08);
+}
+
+.home-gps-badge.searching svg {
+  animation: gps-blink 1s ease-in-out infinite;
+}
+
+.home-gps-badge.offline {
+  color: var(--text-dim);
+}
+
+.home-nav-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 20px;
+  color: var(--blue);
+  background: rgba(45, 175, 255, 0.1);
+}
+
+.home-coords {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.home-coords-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.home-coords-value {
+  font-size: 13px;
+  font-weight: 500;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text);
+}

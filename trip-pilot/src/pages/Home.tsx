@@ -1,15 +1,52 @@
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+
+interface DeviceStatus {
+  deviceId: string
+  online: boolean
+  lat: number
+  lng: number
+  gpsValid: boolean
+  navigating: boolean
+  lastSeen: number
+}
 
 export default function Home() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const device = user?.devices?.[0]
+  const DEVICE_ID = device?.deviceId || 'tripper-001'
+
+  const [status, setStatus] = useState<DeviceStatus | null>(null)
+
+  // Poll device status every 3 seconds
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/device/${DEVICE_ID}`)
+        if (res.ok) {
+          setStatus(await res.json())
+        } else {
+          setStatus(null)
+        }
+      } catch {
+        setStatus(null)
+      }
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => clearInterval(interval)
+  }, [DEVICE_ID])
+
+  const isOnline = status?.online ?? false
 
   return (
     <div className="home-page">
       <div className="home-header">
-        <h1 className="home-brand">TRIPPER</h1>
+        <h1 className="home-brand">TRIPPER PILOT</h1>
         <p className="home-greeting">Hello, {user?.name}</p>
       </div>
 
@@ -25,7 +62,13 @@ export default function Home() {
           <span className="home-device-name">{device?.name || 'My Tripper'}</span>
           <span className="home-device-id">{device?.deviceId}</span>
         </div>
+        <div className={`home-device-badge ${isOnline ? 'online' : 'offline'}`}>
+          <span className="home-device-badge-dot" />
+          {isOnline ? 'Connected' : 'Offline'}
+        </div>
       </div>
+
+
 
       <div className="home-actions">
         <button className="home-action-btn home-action-directions" onClick={() => navigate('/directions')}>
