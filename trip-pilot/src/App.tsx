@@ -246,10 +246,50 @@ function App() {
         const encoded = encodeURIComponent(value.trim())
         const lat = device?.lat ?? browserGps.location?.lat ?? DEFAULT_CENTER[0]
         const lng = device?.lng ?? browserGps.location?.lng ?? DEFAULT_CENTER[1]
-        const res = await fetch(
-          `${API_BASE}/api/search?q=${encoded}&lat=${lat}&lng=${lng}`
-        )
-        const results: SearchResult[] = await res.json()
+
+        let results: SearchResult[] = []
+
+        // Try server API first
+        try {
+          const res = await fetch(
+            `${API_BASE}/api/search?q=${encoded}&lat=${lat}&lng=${lng}`,
+            { signal: AbortSignal.timeout(4000) }
+          )
+          if (res.ok) {
+            results = await res.json()
+          }
+        } catch {
+          // Server unreachable or timed out — fall through to client-side fallback
+        }
+
+        // Fallback: call Nominatim directly from the browser if server returned nothing
+        if (results.length === 0) {
+          try {
+            const nomRes = await fetch(
+              `https://nominatim.openstreetmap.org/search?format=json&q=${encoded}&limit=5&addressdetails=1&countrycodes=in&viewbox=68.0,6.0,97.5,37.0&bounded=1`,
+              { headers: { 'Accept': 'application/json' } }
+            )
+            if (nomRes.ok) {
+              const nomData = await nomRes.json()
+              const refLat = Number(lat)
+              const refLng = Number(lng)
+              nomData.sort((a: any, b: any) => {
+                const distA = Math.hypot(parseFloat(a.lat) - refLat, parseFloat(a.lon) - refLng)
+                const distB = Math.hypot(parseFloat(b.lat) - refLat, parseFloat(b.lon) - refLng)
+                return distA - distB
+              })
+              results = nomData.slice(0, 5).map((r: any) => ({
+                name: r.display_name.split(',')[0],
+                address: r.display_name,
+                lat: parseFloat(r.lat),
+                lng: parseFloat(r.lon),
+              }))
+            }
+          } catch {
+            // Both server and Nominatim failed
+          }
+        }
+
         setSuggestions(results)
         setShowSuggestions(results.length > 0)
       } catch {
@@ -401,13 +441,8 @@ function App() {
     ? [browserGps.location.lat, browserGps.location.lng]
     : null
 
-  // Determine effective position and GPS source
+  // Determine effective position
   const effectivePos: [number, number] | null = devicePos ?? browserPos
-  const gpsSource: 'tripper' | 'browser' | null = devicePos
-    ? 'tripper'
-    : browserPos
-      ? 'browser'
-      : null
 
   const center: [number, number] = effectivePos ?? DEFAULT_CENTER
   // Follow the rider when we have a position and the user isn't mid-selecting a
@@ -431,28 +466,6 @@ function App() {
             <div className={`gps-status ${hasFix ? 'fixed' : 'searching'}`}>
               <span className="dot" />
               {hasFix ? 'GPS' : 'GPS…'}
-            </div>
-          )}
-          {/* GPS Source indicator */}
-          {gpsSource && (
-            <div className={`gps-source-badge ${gpsSource}`}>
-              {gpsSource === 'tripper' ? (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-                  </svg>
-                  Tripper GPS
-                </>
-              ) : (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="5" y="2" width="14" height="20" rx="2" />
-                    <circle cx="12" cy="18" r="1" />
-                  </svg>
-                  Phone GPS
-                </>
-              )}
             </div>
           )}
           <div className={`device-status ${device?.online ? 'online' : 'offline'}`}>
