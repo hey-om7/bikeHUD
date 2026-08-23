@@ -159,6 +159,11 @@ export function createApiRouter(deviceManager, navEngine) {
       deviceManager.updateGPS(deviceId, parseFloat(lat), parseFloat(lng), false);
       console.log(`[API] Browser GPS pushed for ${deviceId}: (${lat}, ${lng}) source=${source || 'browser'}`);
     }
+    // Record breadcrumb if navigating (browser GPS fallback path recording)
+    const session = deviceManager.getNavSession(deviceId);
+    if (session) {
+      deviceManager.addBreadcrumb(deviceId, parseFloat(lat), parseFloat(lng), 'browser');
+    }
     res.json({ success: true, used: !device.gpsValid });
   });
 
@@ -311,6 +316,143 @@ export function createApiRouter(deviceManager, navEngine) {
     }
     deviceManager.stopNavigation(deviceId);
     res.json({ success: true });
+  });
+
+  // GET /api/device/:id/backtrack - check if backtracking is available
+  // Returns the breadcrumb count and metadata from the last navigation
+  router.get('/device/:id/backtrack', (req, res) => {
+    const deviceId = req.params.id;
+    const { breadcrumbs, meta } = deviceManager.getLastBreadcrumbs(deviceId) || {};
+    if (!breadcrumbs || breadcrumbs.length < 2) {
+      return res.json({ available: false });
+    }
+    res.json({
+      available: true,
+      pointCount: breadcrumbs.length,
+      meta,
+      startPoint: breadcrumbs[0],
+      endPoint: breadcrumbs[breadcrumbs.length - 1]
+    });
+  });
+
+  // POST /api/navigate/backtrack - start backtrack navigation along the reversed breadcrumb path
+  // Body: { deviceId }
+  router.post('/navigate/backtrack', async (req, res) => {
+    const { deviceId } = req.body;
+
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Missing deviceId' });
+    }
+
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    if (!device.online) {
+      return res.status(409).json({ error: 'Device is offline' });
+    }
+
+    const { breadcrumbs, meta } = deviceManager.getLastBreadcrumbs(deviceId) || {};
+    if (!breadcrumbs || breadcrumbs.length < 2) {
+      return res.status(400).json({ error: 'No breadcrumb trail available for backtracking' });
+    }
+
+    try {
+      // Reverse the breadcrumbs to create a route back to the start
+      const reversedCrumbs = [...breadcrumbs].reverse();
+
+      // Convert breadcrumbs to route geometry format: [[lng, lat], ...]
+      const geometry = reversedCrumbs.map(c => [c.lng, c.lat]);
+
+      // Generate turn points by detecting heading changes > 35 degrees
+      const turnPoints = [];
+      let cumDist = 0;
+      for (let i = 1; i < geometry.length; i++) {
+        const dLat = geometry[i][1] - geometry[i - 1][1];
+        const dLng = geometry[i][0] - geometry[i - 1][0];
+        const segDist = Math.sqrt(dLat * dLat + dLng * dLng) * 111320; // rough m
+        cumDist += segDist;
+
+        if (i < geometry.length - 1) {
+          // heading before this point
+          const h1 = Math.atan2(geometry[i][0] - geometry[i - 1][0], geometry[i][1] - geometry[i - 1][1]);
+          // heading after this point
+          const h2 = Math.atan2(geometry[i + 1][0] - geometry[i][0], geometry[i + 1][1] - geometry[i][1]);
+          let angleDiff = (h2 - h1) * 180 / Math.PI;
+          // Normalize to -180..180
+          while (angleDiff > 180) angleDiff -= 360;
+          while (angleDiff < -180) angleDiff += 360;
+
+          if (Math.abs(angleDiff) > 35) {
+            let direction;
+            if (angleDiff > 120) direction = 'sharp-left';
+            else if (angleDiff > 45) direction = 'left';
+            else if (angleDiff > 0) direction = 'slight-left';
+            else if (angleDiff < -120) direction = 'sharp-right';
+            else if (angleDiff < -45) direction = 'right';
+            else direction = 'slight-right';
+
+            turnPoints.push({
+              dist: cumDist,
+              direction,
+              instruction: `Turn ${direction.replace('-', ' ')}`
+            });
+          }
+        }
+      }
+
+      // Calculate total distance
+      const cum = cumulativeDistances(geometry);
+      const totalDistance = cum[cum.length - 1] || 0;
+
+      // Build the route object compatible with the frame renderer
+      const backtrackRoute = {
+        geometry,
+        turnPoints,
+        totalDistance,
+        roads: [], // skip nearby roads for immediate backtrack start
+        summary: {
+          distance: totalDistance > 1000
+            ? `${(totalDistance / 1000).toFixed(1)} km`
+            : `${Math.round(totalDistance)} m`,
+          duration: '', // unknown for backtrack
+          startAddress: 'Current location',
+          endAddress: meta?.summary?.startAddress || 'Start point'
+        }
+      };
+
+      const frames = buildFrames(backtrackRoute);
+
+      // The destination is where the original navigation started (first breadcrumb = last in reversed)
+      const destLat = breadcrumbs[0].lat;
+      const destLng = breadcrumbs[0].lng;
+
+      const started = deviceManager.startNavigation(deviceId, frames, { route: backtrackRoute, cum }, {
+        summary: backtrackRoute.summary,
+        destLat,
+        destLng,
+        isBacktrack: true
+      });
+
+      if (!started) {
+        return res.status(500).json({ error: 'Failed to send backtrack command to device' });
+      }
+
+      // Clear the preserved breadcrumbs since we've started using them
+      deviceManager.clearLastBreadcrumbs(deviceId);
+
+      res.json({
+        success: true,
+        summary: backtrackRoute.summary,
+        totalChunks: frames.length,
+        pointCount: breadcrumbs.length,
+        destLat,
+        destLng
+      });
+    } catch (e) {
+      console.error('[API] Backtrack error:', e);
+      res.status(500).json({ error: 'Failed to start backtrack navigation' });
+    }
   });
 
   return router;

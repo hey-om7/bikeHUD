@@ -162,6 +162,9 @@ function handleLiveGpsFrame(ws, deviceId, lat, lng) {
   const session = deviceManager.getNavSession(deviceId);
   if (!session || !session.route || !session.cum) return; // no closed-loop context
 
+  // Record breadcrumb for backtracking
+  deviceManager.addBreadcrumb(deviceId, lat, lng, 'esp');
+
   const geometry = session.route.geometry || [];
   const cum = session.cum;
   const total = cum[cum.length - 1] || 0;

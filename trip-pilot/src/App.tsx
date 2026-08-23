@@ -120,6 +120,8 @@ function App() {
   const [navSummary, setNavSummary] = useState<NavSummary | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [backtrackAvailable, setBacktrackAvailable] = useState(false)
+  const [isBacktracking, setIsBacktracking] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchRef = useRef<HTMLDivElement>(null)
 
@@ -188,6 +190,15 @@ function App() {
             setNavSummary(null)
             setDestLat(null)
             setDestLng(null)
+            setIsBacktracking(false)
+            // Check if backtracking is available
+            try {
+              const btRes = await fetch(`${API_BASE}/api/device/${DEVICE_ID}/backtrack`)
+              if (btRes.ok) {
+                const btData = await btRes.json()
+                setBacktrackAvailable(btData.available)
+              }
+            } catch { /* ignore */ }
           }
         } else {
           setDevice(null)
@@ -334,6 +345,48 @@ function App() {
     } catch { /* ignore */ }
     setNavigating(false)
     setNavSummary(null)
+    setIsBacktracking(false)
+
+    // Check if backtracking is available after stopping
+    try {
+      const res = await fetch(`${API_BASE}/api/device/${DEVICE_ID}/backtrack`)
+      if (res.ok) {
+        const data = await res.json()
+        setBacktrackAvailable(data.available)
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Start backtrack navigation
+  const handleStartBacktrack = async () => {
+    if (!device?.online) {
+      setError('Device is offline')
+      return
+    }
+    setLoading(true)
+    setError('')
+
+    try {
+      const res = await fetch(`${API_BASE}/api/navigate/backtrack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: DEVICE_ID })
+      })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setNavigating(true)
+        setIsBacktracking(true)
+        setBacktrackAvailable(false)
+        setNavSummary(data.summary)
+        setDestLat(data.destLat)
+        setDestLng(data.destLng)
+      } else {
+        setError(data.error || 'Failed to start backtracking')
+      }
+    } catch {
+      setError('Connection error')
+    }
+    setLoading(false)
   }
 
   // The device position is only trustworthy once the GPS has a valid fix.
@@ -497,23 +550,58 @@ function App() {
 
         {navigating && navSummary ? (
           <div className="nav-active-panel">
+            {isBacktracking && (
+              <div className="backtrack-banner">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="1 4 1 10 7 10" />
+                  <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                </svg>
+                Backtracking to start
+              </div>
+            )}
             <div className="nav-info">
               <div className="nav-stat">
                 <span className="stat-value">{navSummary.distance}</span>
                 <span className="stat-label">Distance</span>
               </div>
               <div className="nav-stat">
-                <span className="stat-value">{navSummary.duration}</span>
-                <span className="stat-label">ETA</span>
+                <span className="stat-value">{isBacktracking ? 'Backtrack' : navSummary.duration}</span>
+                <span className="stat-label">{isBacktracking ? 'Mode' : 'ETA'}</span>
               </div>
             </div>
             <p className="nav-dest">{navSummary.endAddress}</p>
             <button className="btn btn-stop" onClick={handleStopNavigation}>
-              Stop Navigation
+              {isBacktracking ? 'Stop Backtracking' : 'Stop Navigation'}
             </button>
           </div>
         ) : (
           <div className="destination-panel">
+            {/* Backtrack button - shown after stopping navigation when breadcrumbs are available */}
+            {backtrackAvailable && destLat === null && (
+              <div className="backtrack-offer">
+                <div className="backtrack-offer-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="1 4 1 10 7 10" />
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                  </svg>
+                  <span>Backtrack to where you started?</span>
+                </div>
+                <button
+                  className="btn btn-backtrack"
+                  onClick={handleStartBacktrack}
+                  disabled={loading || !device?.online}
+                >
+                  {loading ? 'Starting...' : 'Navigate Back'}
+                </button>
+                <button
+                  className="backtrack-dismiss"
+                  onClick={() => setBacktrackAvailable(false)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
             {destLat !== null && destLng !== null ? (
               <>
                 <div className="dest-info">
@@ -544,7 +632,7 @@ function App() {
                 </button>
               </>
             ) : (
-              <p className="hint">Tap the map or search to set a destination</p>
+              !backtrackAvailable && <p className="hint">Tap the map or search to set a destination</p>
             )}
           </div>
         )}

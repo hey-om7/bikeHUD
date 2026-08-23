@@ -22,6 +22,8 @@ export default function Home() {
   const DEVICE_ID = device?.deviceId || 'tripper-001'
 
   const [status, setStatus] = useState<DeviceStatus | null>(null)
+  const [backtrackAvailable, setBacktrackAvailable] = useState(false)
+  const [backtrackLoading, setBacktrackLoading] = useState(false)
   const browserGps = useBrowserLocation()
 
   // Start watching browser location
@@ -43,9 +45,17 @@ export default function Home() {
       } catch {
         setStatus(null)
       }
+      // Check backtrack availability
+      try {
+        const btRes = await fetch(`${API_BASE}/api/device/${DEVICE_ID}/backtrack`)
+        if (btRes.ok) {
+          const btData = await btRes.json()
+          setBacktrackAvailable(btData.available)
+        }
+      } catch { /* ignore */ }
     }
     poll()
-    const interval = setInterval(poll, 3000)
+    const interval = setInterval(poll, 5000)
     return () => clearInterval(interval)
   }, [DEVICE_ID])
 
@@ -53,6 +63,25 @@ export default function Home() {
   const hasTripperGps = !!(status && status.online && status.gpsValid && (status.lat !== 0 || status.lng !== 0))
   const hasBrowserGps = !!browserGps.location
   const gpsSource: 'tripper' | 'browser' | null = hasTripperGps ? 'tripper' : hasBrowserGps ? 'browser' : null
+
+  // Start backtracking directly from home
+  const handleBacktrack = async () => {
+    if (!isOnline) return
+    setBacktrackLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/navigate/backtrack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: DEVICE_ID })
+      })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        // Navigate to directions page which will pick up the active nav session
+        navigate('/directions')
+      }
+    } catch { /* ignore */ }
+    setBacktrackLoading(false)
+  }
 
   return (
     <div className="home-page">
@@ -117,6 +146,28 @@ export default function Home() {
             <polyline points="9 18 15 12 9 6" />
           </svg>
         </button>
+
+        {backtrackAvailable && (
+          <button
+            className="home-action-btn home-action-backtrack"
+            onClick={handleBacktrack}
+            disabled={backtrackLoading || !isOnline}
+          >
+            <div className="home-action-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="1 4 1 10 7 10" />
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+              </svg>
+            </div>
+            <div className="home-action-text">
+              <span className="home-action-title">{backtrackLoading ? 'Starting...' : 'Backtrack'}</span>
+              <span className="home-action-desc">Navigate back to where you started</span>
+            </div>
+            <svg className="home-action-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+        )}
 
         <button className="home-action-btn home-action-settings" onClick={() => navigate('/settings')}>
           <div className="home-action-icon">

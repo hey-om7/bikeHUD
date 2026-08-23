@@ -107,7 +107,10 @@ export class DeviceManager {
       // Persisted for frontend state recovery on reconnect/reload
       summary: meta ? meta.summary : null,
       destLat: meta ? meta.destLat : null,
-      destLng: meta ? meta.destLng : null
+      destLng: meta ? meta.destLng : null,
+      // Breadcrumb trail: records actual GPS positions during navigation
+      breadcrumbs: [],
+      isBacktrack: meta ? (meta.isBacktrack || false) : false
     };
 
     // Send START_NAVIGATION command to device
@@ -141,6 +144,17 @@ export class DeviceManager {
   completeNavigation(deviceId) {
     const device = this.devices.get(deviceId);
     if (device) {
+      // Preserve breadcrumbs for backtracking before clearing the session
+      if (device.navSession && device.navSession.breadcrumbs && device.navSession.breadcrumbs.length > 0) {
+        device.lastBreadcrumbs = device.navSession.breadcrumbs;
+        device.lastNavMeta = {
+          summary: device.navSession.summary,
+          destLat: device.navSession.destLat,
+          destLng: device.navSession.destLng,
+          startedAt: device.navSession.startedAt,
+          isBacktrack: device.navSession.isBacktrack || false
+        };
+      }
       device.navSession = null;
     }
   }
@@ -148,6 +162,17 @@ export class DeviceManager {
   stopNavigation(deviceId) {
     const device = this.devices.get(deviceId);
     if (device) {
+      // Preserve breadcrumbs for backtracking before clearing the session
+      if (device.navSession && device.navSession.breadcrumbs && device.navSession.breadcrumbs.length > 0) {
+        device.lastBreadcrumbs = device.navSession.breadcrumbs;
+        device.lastNavMeta = {
+          summary: device.navSession.summary,
+          destLat: device.navSession.destLat,
+          destLng: device.navSession.destLng,
+          startedAt: device.navSession.startedAt,
+          isBacktrack: device.navSession.isBacktrack || false
+        };
+      }
       device.navSession = null;
       if (device.ws && device.ws.readyState === device.ws.OPEN) {
         device.ws.send(JSON.stringify({ type: 'STOP_NAVIGATION' }));
@@ -161,5 +186,60 @@ export class DeviceManager {
     if (device && device.ws && device.ws.readyState === device.ws.OPEN) {
       device.ws.send(JSON.stringify({ type: 'GPS_REQUEST' }));
     }
+  }
+
+  // ===== Breadcrumb Trail =====
+
+  // Record a GPS breadcrumb during navigation.
+  // Deduplicates: skips if within 5m of the last recorded point.
+  addBreadcrumb(deviceId, lat, lng, source = 'esp') {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.navSession) return;
+
+    const crumbs = device.navSession.breadcrumbs;
+    if (crumbs.length > 0) {
+      const last = crumbs[crumbs.length - 1];
+      const dist = this._haversineM(last.lat, last.lng, lat, lng);
+      if (dist < 5) return; // within 5m, skip
+    }
+
+    crumbs.push({ lat, lng, source, t: Date.now() });
+  }
+
+  // Get breadcrumbs from the active navigation session
+  getBreadcrumbs(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.navSession) return null;
+    return device.navSession.breadcrumbs;
+  }
+
+  // Get breadcrumbs preserved from the last completed/stopped navigation
+  getLastBreadcrumbs(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) return null;
+    return {
+      breadcrumbs: device.lastBreadcrumbs || null,
+      meta: device.lastNavMeta || null
+    };
+  }
+
+  // Clear preserved breadcrumbs (after starting backtrack or explicitly)
+  clearLastBreadcrumbs(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (device) {
+      device.lastBreadcrumbs = null;
+      device.lastNavMeta = null;
+    }
+  }
+
+  // Simple haversine distance in meters
+  _haversineM(lat1, lng1, lat2, lng2) {
+    const R = 6371000;
+    const toRad = (d) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 }
