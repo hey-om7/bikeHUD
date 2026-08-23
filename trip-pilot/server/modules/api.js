@@ -141,6 +141,27 @@ export function createApiRouter(deviceManager, navEngine) {
     });
   });
 
+  // POST /api/device/:id/location - accept browser-sourced GPS location
+  // Used as fallback when the ESP's GPS has no fix. The frontend pushes
+  // the phone/laptop location so navigation can still work.
+  router.post('/device/:id/location', (req, res) => {
+    const { lat, lng, source } = req.body;
+    if (lat === undefined || lng === undefined) {
+      return res.status(400).json({ error: 'Missing lat or lng' });
+    }
+    const deviceId = req.params.id;
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    // Only update if the device's own GPS doesn't have a valid fix
+    if (!device.gpsValid) {
+      deviceManager.updateGPS(deviceId, parseFloat(lat), parseFloat(lng), false);
+      console.log(`[API] Browser GPS pushed for ${deviceId}: (${lat}, ${lng}) source=${source || 'browser'}`);
+    }
+    res.json({ success: true, used: !device.gpsValid });
+  });
+
   // ===== Navigation =====
   // POST /api/navigate - start navigation
   // Body: { deviceId, destLat, destLng }

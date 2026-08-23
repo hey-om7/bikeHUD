@@ -5,6 +5,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
 import { useAuth } from './context/AuthContext'
+import { useBrowserLocation } from './hooks/useBrowserLocation'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 const DEFAULT_CENTER: [number, number] = [18.5534, 73.9468] // Kharadi, Pune
@@ -122,6 +123,39 @@ function App() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchRef = useRef<HTMLDivElement>(null)
 
+  // Browser GPS fallback
+  const browserGps = useBrowserLocation()
+
+  // Start watching browser location immediately (user will be prompted for permission)
+  useEffect(() => {
+    browserGps.start()
+    return () => browserGps.stop()
+  }, [])
+
+  // Push browser GPS to server periodically when ESP has no fix but browser does
+  // This keeps the server's device position updated for live navigation rendering
+  useEffect(() => {
+    if (!browserGps.location || !device?.online || (device.gpsValid && (device.lat !== 0 || device.lng !== 0))) {
+      return // ESP has fix, no need to push browser location
+    }
+    const push = async () => {
+      try {
+        await fetch(`${API_BASE}/api/device/${DEVICE_ID}/location`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat: browserGps.location!.lat,
+            lng: browserGps.location!.lng,
+            source: 'browser'
+          })
+        })
+      } catch { /* ignore */ }
+    }
+    push()
+    const interval = setInterval(push, 3000)
+    return () => clearInterval(interval)
+  }, [browserGps.location?.lat, browserGps.location?.lng, device?.online, device?.gpsValid, DEVICE_ID])
+
   // Poll device status
   useEffect(() => {
     const poll = async () => {
@@ -199,8 +233,8 @@ function App() {
       setSearching(true)
       try {
         const encoded = encodeURIComponent(value.trim())
-        const lat = device?.lat ?? DEFAULT_CENTER[0]
-        const lng = device?.lng ?? DEFAULT_CENTER[1]
+        const lat = device?.lat ?? browserGps.location?.lat ?? DEFAULT_CENTER[0]
+        const lng = device?.lng ?? browserGps.location?.lng ?? DEFAULT_CENTER[1]
         const res = await fetch(
           `${API_BASE}/api/search?q=${encoded}&lat=${lat}&lng=${lng}`
         )
@@ -243,6 +277,24 @@ function App() {
     }
     setLoading(true)
     setError('')
+
+    // If ESP doesn't have GPS fix, push browser location to server first
+    if (!hasFix && browserGps.location) {
+      try {
+        await fetch(`${API_BASE}/api/device/${DEVICE_ID}/location`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat: browserGps.location.lat,
+            lng: browserGps.location.lng,
+            source: 'browser'
+          })
+        })
+      } catch {
+        // Non-fatal — server will use whatever position it has
+      }
+    }
+
     try {
       const res = await fetch(`${API_BASE}/api/navigate`, {
         method: 'POST',
@@ -290,10 +342,24 @@ function App() {
   const hasFix = !!(device && device.online && device.gpsValid &&
                     (device.lat !== 0 || device.lng !== 0))
   const devicePos: [number, number] | null = hasFix ? [device!.lat, device!.lng] : null
-  const center: [number, number] = devicePos ?? DEFAULT_CENTER
-  // Follow the rider when we have a fix and the user isn't mid-selecting a
+
+  // Browser GPS fallback: use phone/laptop location when ESP has no fix
+  const browserPos: [number, number] | null = browserGps.location
+    ? [browserGps.location.lat, browserGps.location.lng]
+    : null
+
+  // Determine effective position and GPS source
+  const effectivePos: [number, number] | null = devicePos ?? browserPos
+  const gpsSource: 'tripper' | 'browser' | null = devicePos
+    ? 'tripper'
+    : browserPos
+      ? 'browser'
+      : null
+
+  const center: [number, number] = effectivePos ?? DEFAULT_CENTER
+  // Follow the rider when we have a position and the user isn't mid-selecting a
   // destination (during navigation we keep following).
-  const followEnabled = hasFix && (navigating || destLat === null)
+  const followEnabled = effectivePos !== null && (navigating || destLat === null)
 
   return (
     <div className="app">
@@ -314,6 +380,28 @@ function App() {
               {hasFix ? 'GPS' : 'GPS…'}
             </div>
           )}
+          {/* GPS Source indicator */}
+          {gpsSource && (
+            <div className={`gps-source-badge ${gpsSource}`}>
+              {gpsSource === 'tripper' ? (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
+                  </svg>
+                  Tripper GPS
+                </>
+              ) : (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="5" y="2" width="14" height="20" rx="2" />
+                    <circle cx="12" cy="18" r="1" />
+                  </svg>
+                  Phone GPS
+                </>
+              )}
+            </div>
+          )}
           <div className={`device-status ${device?.online ? 'online' : 'offline'}`}>
             <span className="dot" />
             {device?.online ? 'Connected' : 'Offline'}
@@ -323,22 +411,22 @@ function App() {
 
       {/* Map */}
       <div className="map-container">
-        <MapContainer center={center} zoom={hasFix ? 12 : 13} zoomControl={false} attributionControl={false}>
+        <MapContainer center={center} zoom={effectivePos ? 12 : 13} zoomControl={false} attributionControl={false}>
           <TileLayer
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             maxZoom={19}
           />
           <MapClickHandler onMapClick={handleMapClick} disabled={navigating} />
-          <FollowDevice pos={devicePos} enabled={followEnabled} />
+          <FollowDevice pos={effectivePos} enabled={followEnabled} />
           <FlyToDest lat={destLat} lng={destLng} />
-          {devicePos && <Marker position={devicePos} icon={defaultIcon} />}
+          {effectivePos && <Marker position={effectivePos} icon={defaultIcon} />}
           {destLat !== null && destLng !== null && (
             <Marker position={[destLat, destLng]} icon={destIcon} />
           )}
         </MapContainer>
 
         {/* Waiting-for-fix hint */}
-        {device?.online && !hasFix && (
+        {device?.online && !hasFix && !browserPos && (
           <div className="gps-wait-banner">Waiting for GPS fix…</div>
         )}
 

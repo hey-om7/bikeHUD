@@ -1131,3 +1131,51 @@ body {
   font-family: 'SF Mono', 'Fira Code', monospace;
   color: var(--text);
 }
+
+
+
+/* ===== GPS Source Badges (Status Bar + Home Page) ===== */
+.gps-source-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.gps-source-badge.tripper {
+  color: var(--green);
+  background: rgba(43, 224, 48, 0.1);
+}
+
+.gps-source-badge.browser {
+  color: var(--blue);
+  background: rgba(45, 175, 255, 0.1);
+}
+
+/* Home page GPS source indicator */
+.home-gps-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 24px;
+}
+
+.home-gps-source.tripper {
+  color: var(--green);
+  background: rgba(43, 224, 48, 0.06);
+  border: 1px solid rgba(43, 224, 48, 0.15);
+}
+
+.home-gps-source.browser {
+  color: var(--blue);
+  background: rgba(45, 175, 255, 0.06);
+  border: 1px solid rgba(45, 175, 255, 0.15);
+}

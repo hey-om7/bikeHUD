@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { useBrowserLocation } from '../hooks/useBrowserLocation'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -21,6 +22,13 @@ export default function Home() {
   const DEVICE_ID = device?.deviceId || 'tripper-001'
 
   const [status, setStatus] = useState<DeviceStatus | null>(null)
+  const browserGps = useBrowserLocation()
+
+  // Start watching browser location
+  useEffect(() => {
+    browserGps.start()
+    return () => browserGps.stop()
+  }, [])
 
   // Poll device status every 3 seconds
   useEffect(() => {
@@ -42,6 +50,9 @@ export default function Home() {
   }, [DEVICE_ID])
 
   const isOnline = status?.online ?? false
+  const hasTripperGps = !!(status && status.online && status.gpsValid && (status.lat !== 0 || status.lng !== 0))
+  const hasBrowserGps = !!browserGps.location
+  const gpsSource: 'tripper' | 'browser' | null = hasTripperGps ? 'tripper' : hasBrowserGps ? 'browser' : null
 
   return (
     <div className="home-page">
@@ -68,7 +79,28 @@ export default function Home() {
         </div>
       </div>
 
-
+      {/* GPS Source Indicator */}
+      {gpsSource && (
+        <div className={`home-gps-source ${gpsSource}`}>
+          {gpsSource === 'tripper' ? (
+            <>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
+              </svg>
+              <span>Using Tripper GPS</span>
+            </>
+          ) : (
+            <>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="5" y="2" width="14" height="20" rx="2" />
+                <circle cx="12" cy="18" r="1" />
+              </svg>
+              <span>Using this device's GPS</span>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="home-actions">
         <button className="home-action-btn home-action-directions" onClick={() => navigate('/directions')}>
