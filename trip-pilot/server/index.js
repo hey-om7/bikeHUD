@@ -21,6 +21,7 @@ import { connectDB } from './modules/db.js';
 import { createAuthRouter } from './modules/auth.js';
 import { createDevicePairingRouter, handleDeviceRegister } from './modules/devicePairing.js';
 import { Device } from './models/Device.js';
+import { Ride } from './models/Ride.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -109,6 +110,60 @@ async function checkDevicePairingStatus(ws, deviceId) {
   }
 }
 
+// ===== Save Ride to DB =====
+// Persists a completed/stopped navigation session as a Ride document.
+async function saveRide(deviceId, session) {
+  if (!session || !session.breadcrumbs || session.breadcrumbs.length < 2) return;
+  try {
+    // Calculate total distance from breadcrumbs
+    let totalDist = 0;
+    for (let i = 1; i < session.breadcrumbs.length; i++) {
+      const prev = session.breadcrumbs[i - 1];
+      const curr = session.breadcrumbs[i];
+      const R = 6371000;
+      const dLat = (curr.lat - prev.lat) * Math.PI / 180;
+      const dLng = (curr.lng - prev.lng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(prev.lat * Math.PI / 180) * Math.cos(curr.lat * Math.PI / 180) *
+                Math.sin(dLng / 2) ** 2;
+      totalDist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    const startedAt = new Date(session.startedAt);
+    const endedAt = new Date();
+    const durationSec = Math.round((endedAt - startedAt) / 1000);
+
+    // Look up owner from Device model
+    let owner = null;
+    try {
+      const deviceDoc = await Device.findOne({ deviceId });
+      if (deviceDoc && deviceDoc.owner) owner = deviceDoc.owner;
+    } catch { /* ignore */ }
+
+    await Ride.create({
+      deviceId,
+      owner,
+      startedAt,
+      endedAt,
+      duration: durationSec,
+      distance: Math.round(totalDist),
+      path: session.breadcrumbs.map(p => ({ lat: p.lat, lng: p.lng, t: p.t })),
+      summary: {
+        distance: session.summary?.distance || (totalDist > 1000 ? `${(totalDist / 1000).toFixed(1)} km` : `${Math.round(totalDist)} m`),
+        duration: session.summary?.duration || `${Math.floor(durationSec / 60)} min`,
+        startAddress: session.summary?.startAddress || '',
+        endAddress: session.summary?.endAddress || '',
+      },
+      type: session.isBacktrack ? 'backtrack' : 'navigation',
+      destLat: session.destLat ?? null,
+      destLng: session.destLng ?? null,
+    });
+    console.log(`[RIDES] Saved ride for ${deviceId}: ${Math.round(totalDist)}m, ${durationSec}s, ${session.breadcrumbs.length} points`);
+  } catch (e) {
+    console.error('[RIDES] Failed to save ride:', e.message);
+  }
+}
+
 // ===== Handle Device Messages =====
 function handleDeviceMessage(ws, msg) {
   switch (msg.type) {
@@ -138,7 +193,8 @@ function handleDeviceMessage(ws, msg) {
 
     case 'NAV_CHUNK_CONSUMED':
       if (msg.complete) {
-        deviceManager.completeNavigation(msg.deviceId);
+        const session = deviceManager.completeNavigation(msg.deviceId);
+        saveRide(msg.deviceId, session);
         sendToDevice(ws, { type: 'NAV_COMPLETE' });
         console.log(`[NAV] Device ${msg.deviceId} completed navigation`);
       }
@@ -192,7 +248,8 @@ function handleLiveGpsFrame(ws, deviceId, lat, lng) {
   sendToDevice(ws, frame);
 
   if (frame.isLast) {
-    deviceManager.completeNavigation(deviceId);
+    const session = deviceManager.completeNavigation(deviceId);
+    saveRide(deviceId, session);
     console.log(`[NAV] Device ${deviceId} reached destination (live GPS)`);
   }
 }

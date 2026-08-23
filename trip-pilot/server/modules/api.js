@@ -5,6 +5,8 @@
 import { Router } from 'express';
 import { buildFrames } from './frameRenderer.js';
 import { cumulativeDistances } from './navigationEngine.js';
+import { Ride } from '../models/Ride.js';
+import { Device } from '../models/Device.js';
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
@@ -309,12 +311,60 @@ export function createApiRouter(deviceManager, navEngine) {
   });
 
   // POST /api/navigate/stop - stop navigation
-  router.post('/navigate/stop', (req, res) => {
+  router.post('/navigate/stop', async (req, res) => {
     const { deviceId } = req.body;
     if (!deviceId) {
       return res.status(400).json({ error: 'Missing deviceId' });
     }
-    deviceManager.stopNavigation(deviceId);
+    const session = deviceManager.stopNavigation(deviceId);
+    // Auto-save ride
+    if (session && session.breadcrumbs && session.breadcrumbs.length >= 2) {
+      try {
+        let totalDist = 0;
+        for (let i = 1; i < session.breadcrumbs.length; i++) {
+          const prev = session.breadcrumbs[i - 1];
+          const curr = session.breadcrumbs[i];
+          const R = 6371000;
+          const dLat = (curr.lat - prev.lat) * Math.PI / 180;
+          const dLng = (curr.lng - prev.lng) * Math.PI / 180;
+          const a = Math.sin(dLat / 2) ** 2 +
+                    Math.cos(prev.lat * Math.PI / 180) * Math.cos(curr.lat * Math.PI / 180) *
+                    Math.sin(dLng / 2) ** 2;
+          totalDist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+        const startedAt = new Date(session.startedAt);
+        const endedAt = new Date();
+        const durationSec = Math.round((endedAt - startedAt) / 1000);
+
+        let owner = null;
+        try {
+          const deviceDoc = await Device.findOne({ deviceId });
+          if (deviceDoc && deviceDoc.owner) owner = deviceDoc.owner;
+        } catch { /* ignore */ }
+
+        await Ride.create({
+          deviceId,
+          owner,
+          startedAt,
+          endedAt,
+          duration: durationSec,
+          distance: Math.round(totalDist),
+          path: session.breadcrumbs.map(p => ({ lat: p.lat, lng: p.lng, t: p.t })),
+          summary: {
+            distance: session.summary?.distance || (totalDist > 1000 ? `${(totalDist / 1000).toFixed(1)} km` : `${Math.round(totalDist)} m`),
+            duration: session.summary?.duration || `${Math.floor(durationSec / 60)} min`,
+            startAddress: session.summary?.startAddress || '',
+            endAddress: session.summary?.endAddress || '',
+          },
+          type: session.isBacktrack ? 'backtrack' : 'navigation',
+          destLat: session.destLat ?? null,
+          destLng: session.destLng ?? null,
+        });
+        console.log(`[RIDES] Saved ride for ${deviceId} on stop`);
+      } catch (e) {
+        console.error('[RIDES] Failed to save ride on stop:', e.message);
+      }
+    }
     res.json({ success: true });
   });
 
@@ -624,6 +674,77 @@ export function createApiRouter(deviceManager, navEngine) {
     }
     deviceManager.clearBacktrackSession(deviceId);
     res.json({ success: true });
+  });
+
+  // ===== Rides History =====
+
+  // GET /api/rides/:deviceId - list all rides for a device (sorted newest first)
+  // Query params: ?limit=20&offset=0
+  router.get('/rides/:deviceId', async (req, res) => {
+    const { deviceId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const offset = parseInt(req.query.offset) || 0;
+
+    try {
+      const rides = await Ride.find({ deviceId })
+        .sort({ startedAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .select('-path') // exclude full path from list for performance
+        .lean();
+
+      const total = await Ride.countDocuments({ deviceId });
+
+      res.json({
+        rides: rides.map(r => ({
+          id: r._id,
+          startedAt: r.startedAt,
+          endedAt: r.endedAt,
+          duration: r.duration,
+          distance: r.distance,
+          summary: r.summary,
+          type: r.type,
+          destLat: r.destLat,
+          destLng: r.destLng,
+          pointCount: r.path ? r.path.length : 0,
+        })),
+        total,
+        limit,
+        offset,
+      });
+    } catch (e) {
+      console.error('[RIDES] List error:', e.message);
+      res.status(500).json({ error: 'Failed to fetch rides' });
+    }
+  });
+
+  // GET /api/rides/:deviceId/:rideId - get a single ride with full path
+  router.get('/rides/:deviceId/:rideId', async (req, res) => {
+    const { deviceId, rideId } = req.params;
+
+    try {
+      const ride = await Ride.findOne({ _id: rideId, deviceId }).lean();
+      if (!ride) {
+        return res.status(404).json({ error: 'Ride not found' });
+      }
+
+      res.json({
+        id: ride._id,
+        startedAt: ride.startedAt,
+        endedAt: ride.endedAt,
+        duration: ride.duration,
+        distance: ride.distance,
+        summary: ride.summary,
+        type: ride.type,
+        destLat: ride.destLat,
+        destLng: ride.destLng,
+        path: ride.path,
+        pointCount: ride.path ? ride.path.length : 0,
+      });
+    } catch (e) {
+      console.error('[RIDES] Detail error:', e.message);
+      res.status(500).json({ error: 'Failed to fetch ride' });
+    }
   });
 
   return router;

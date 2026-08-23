@@ -1321,3 +1321,353 @@ body {
   flex-direction: column;
   gap: 12px;
 }
+
+
+
+/* ===== Rides Pages ===== */
+.rides-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  max-width: 430px;
+  margin: 0 auto;
+}
+
+.rides-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.rides-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
+}
+
+.rides-count {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.rides-content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.rides-loading, .rides-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.rides-empty svg {
+  opacity: 0.4;
+}
+
+.rides-empty p {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.rides-empty span {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rides-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Ride Card */
+.ride-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.ride-card:active {
+  background: var(--surface-hover);
+}
+
+.ride-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ride-card-date {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ride-card-type {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ride-card-type.navigation {
+  color: var(--accent);
+  background: rgba(255, 140, 0, 0.1);
+}
+
+.ride-card-type.backtrack {
+  color: var(--blue);
+  background: rgba(45, 175, 255, 0.1);
+}
+
+.ride-card-stats {
+  display: flex;
+  gap: 12px;
+}
+
+.ride-card-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ride-card-stat-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ride-card-stat-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ride-card-route {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.ride-card-address {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ride-card-chevron {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+}
+
+.rides-footer-note {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 20px;
+  padding: 8px 0;
+}
+
+/* ===== Ride Detail Page ===== */
+.ride-detail-map {
+  width: 100%;
+  height: 240px;
+  position: relative;
+}
+
+.ride-detail-map > .leaflet-container {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.ride-detail-content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ride-detail-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.ride-detail-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ride-detail-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.ride-detail-stat-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ride-detail-section {
+  margin-bottom: 20px;
+}
+
+.ride-detail-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+}
+
+.ride-detail-rows {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.ride-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ride-detail-row:last-child {
+  border-bottom: none;
+}
+
+.ride-detail-row-label {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.ride-detail-row-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  text-align: right;
+  max-width: 60%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Trail Timeline */
+.ride-trail-timeline {
+  position: relative;
+  padding-left: 20px;
+  border-left: 2px solid var(--border);
+  margin-left: 8px;
+}
+
+.ride-trail-point {
+  position: relative;
+  padding: 8px 0 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ride-trail-point::before {
+  content: '';
+  position: absolute;
+  left: -25px;
+  top: 12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  border: 2px solid var(--bg);
+}
+
+.ride-trail-start::before {
+  background: var(--green);
+}
+
+.ride-trail-end::before {
+  background: var(--accent);
+}
+
+.ride-trail-time {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ride-trail-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ride-trail-coords {
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+/* Home page rides action button */
+.home-action-rides .home-action-icon {
+  background: rgba(255, 140, 0, 0.08);
+  color: var(--accent);
+}

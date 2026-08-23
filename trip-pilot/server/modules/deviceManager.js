@@ -144,40 +144,46 @@ export class DeviceManager {
   completeNavigation(deviceId) {
     const device = this.devices.get(deviceId);
     if (device) {
+      const session = device.navSession;
       // Preserve breadcrumbs for backtracking before clearing the session
-      if (device.navSession && device.navSession.breadcrumbs && device.navSession.breadcrumbs.length > 0) {
-        device.lastBreadcrumbs = device.navSession.breadcrumbs;
+      if (session && session.breadcrumbs && session.breadcrumbs.length > 0) {
+        device.lastBreadcrumbs = session.breadcrumbs;
         device.lastNavMeta = {
-          summary: device.navSession.summary,
-          destLat: device.navSession.destLat,
-          destLng: device.navSession.destLng,
-          startedAt: device.navSession.startedAt,
-          isBacktrack: device.navSession.isBacktrack || false
+          summary: session.summary,
+          destLat: session.destLat,
+          destLng: session.destLng,
+          startedAt: session.startedAt,
+          isBacktrack: session.isBacktrack || false
         };
       }
       device.navSession = null;
+      return session; // return for ride recording
     }
+    return null;
   }
 
   stopNavigation(deviceId) {
     const device = this.devices.get(deviceId);
     if (device) {
+      const session = device.navSession;
       // Preserve breadcrumbs for backtracking before clearing the session
-      if (device.navSession && device.navSession.breadcrumbs && device.navSession.breadcrumbs.length > 0) {
-        device.lastBreadcrumbs = device.navSession.breadcrumbs;
+      if (session && session.breadcrumbs && session.breadcrumbs.length > 0) {
+        device.lastBreadcrumbs = session.breadcrumbs;
         device.lastNavMeta = {
-          summary: device.navSession.summary,
-          destLat: device.navSession.destLat,
-          destLng: device.navSession.destLng,
-          startedAt: device.navSession.startedAt,
-          isBacktrack: device.navSession.isBacktrack || false
+          summary: session.summary,
+          destLat: session.destLat,
+          destLng: session.destLng,
+          startedAt: session.startedAt,
+          isBacktrack: session.isBacktrack || false
         };
       }
       device.navSession = null;
       if (device.ws && device.ws.readyState === device.ws.OPEN) {
         device.ws.send(JSON.stringify({ type: 'STOP_NAVIGATION' }));
       }
+      return session; // return for ride recording
     }
+    return null;
   }
 
   // Request GPS from device

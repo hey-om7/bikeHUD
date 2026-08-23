@@ -137,6 +137,22 @@ export default function Home() {
           </svg>
         </button>
 
+        <button className="home-action-btn home-action-rides" onClick={() => navigate('/rides')}>
+          <div className="home-action-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+          </div>
+          <div className="home-action-text">
+            <span className="home-action-title">Rides</span>
+            <span className="home-action-desc">View your ride history &amp; stats</span>
+          </div>
+          <svg className="home-action-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
         <button className="home-action-btn home-action-settings" onClick={() => navigate('/settings')}>
           <div className="home-action-icon">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

@@ -9,6 +9,8 @@ import PairDevice from './pages/PairDevice'
 import Home from './pages/Home'
 import Settings from './pages/Settings'
 import Backtrack from './pages/Backtrack'
+import Rides from './pages/Rides'
+import RideDetail from './pages/RideDetail'
 import './index.css'
 import './App.css'
 
@@ -46,6 +48,8 @@ function AppRoutes() {
       <Route path="/" element={<RequireDevice><Home /></RequireDevice>} />
       <Route path="/directions" element={<RequireDevice><App /></RequireDevice>} />
       <Route path="/backtrack" element={<RequireDevice><Backtrack /></RequireDevice>} />
+      <Route path="/rides" element={<RequireDevice><Rides /></RequireDevice>} />
+      <Route path="/rides/:id" element={<RequireDevice><RideDetail /></RequireDevice>} />
       <Route path="/settings" element={<RequireDevice><Settings /></RequireDevice>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
