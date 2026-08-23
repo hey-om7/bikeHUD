@@ -40,10 +40,18 @@ export class DeviceManager {
   updateGPS(deviceId, lat, lng, valid) {
     const device = this.devices.get(deviceId);
     if (device) {
-      device.lat = lat;
-      device.lng = lng;
       device.gpsValid = valid;
       device.lastSeen = Date.now();
+      // Only overwrite coordinates with a real position. A no-fix ESP now pushes
+      // periodic updates (valid:false) so we learn when the fix is lost, but its
+      // coords may be a (0,0) placeholder — ignore those so we don't wipe out a
+      // browser-pushed fallback location that server-side routing depends on.
+      const hasCoords = (typeof lat === 'number' && typeof lng === 'number' &&
+                         (lat !== 0 || lng !== 0));
+      if (hasCoords) {
+        device.lat = lat;
+        device.lng = lng;
+      }
     }
   }
 

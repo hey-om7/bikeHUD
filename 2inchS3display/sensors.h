@@ -220,16 +220,52 @@ void parseNMEA(String line) {
     // Course over ground is only meaningful when actually moving.
     if (tempHeading >= 0.0 && gpsSpeed > 3.0f) gpsHeading = tempHeading;
   } else if (line.indexOf("GSV") == 3 && line.startsWith("$")) {
-    // GSV = satellites in view (talker can be GP/GL/GA/GN...).
-    // Field 3 (0-indexed) = total number of satellites in view.
-    // This is available DURING acquisition, before a fix exists, so it drives
-    // the on-screen signal-strength indicator instead of the GGA "sats used"
-    // field which stays 0 until a full fix is achieved.
+    // GSV = satellites in view. Each sentence carries up to 4 satellites with
+    // their signal-to-noise ratio (SNR). We only count satellites with SNR >= 20
+    // dB-Hz as "usable signal" — weak signals (bouncing through walls indoors)
+    // are ignored. This prevents showing 4 dots when indoors with no real fix.
+    //
+    // Format: $GxGSV,totalMsgs,msgNum,totalSats,[prn,elev,azimuth,snr]*4
+    //
+    // We accumulate on the first message of a set and finalize on the last.
+    static int gsvGoodSats = 0;
+    static int gsvTotalMsgs = 0;
+
     int tokenIdx = 0, start = 0, end = line.indexOf(',');
+    int totalMsgs = 0, msgNum = 0;
+    int snrCount = 0;  // good-SNR satellites in THIS sentence
+
     while (end != -1) {
       String token = line.substring(start, end);
-      if (tokenIdx == 3 && token.length() > 0) { gpsSatsInView = token.toInt(); break; }
+      if (tokenIdx == 1) totalMsgs = token.toInt();
+      else if (tokenIdx == 2) msgNum = token.toInt();
+      // Satellite data starts at field 4: groups of 4 (PRN, elev, azim, SNR)
+      // SNR is at positions 7, 11, 15, 19 (0-indexed)
+      else if (tokenIdx >= 7 && ((tokenIdx - 7) % 4 == 0) && token.length() > 0) {
+        int snr = token.toInt();
+        if (snr >= 20) snrCount++;
+      }
       tokenIdx++; start = end + 1; end = line.indexOf(',', start);
+    }
+    // Also check the last token (after the final comma, before the checksum '*')
+    String lastToken = line.substring(start);
+    int starIdx = lastToken.indexOf('*');
+    if (starIdx > 0) lastToken = lastToken.substring(0, starIdx);
+    if (tokenIdx >= 7 && ((tokenIdx - 7) % 4 == 0) && lastToken.length() > 0) {
+      int snr = lastToken.toInt();
+      if (snr >= 20) snrCount++;
+    }
+
+    // Reset accumulator on the first message of a new set
+    if (msgNum == 1) {
+      gsvGoodSats = 0;
+      gsvTotalMsgs = totalMsgs;
+    }
+    gsvGoodSats += snrCount;
+
+    // Finalize on the last message of the set
+    if (msgNum >= gsvTotalMsgs && gsvTotalMsgs > 0) {
+      gpsSatsInView = gsvGoodSats;
     }
   }
 }
@@ -325,7 +361,7 @@ void gpsPrintStatus(uint32_t intervalMs) {
                   gpsLat, gpsLng, gpsSatellites, gpsSpeed, gpsHeading, gpsAltitude,
                   fixJustAcquired ? "  <-- FIX ACQUIRED" : "");
   } else {
-    Serial.printf("[GPS] no fix (used=%d, in view=%d) - waiting for satellites...\n",
+    Serial.printf("[GPS] no fix (used=%d, strong signal=%d) - waiting for satellites...\n",
                   gpsSatellites, gpsSatsInView);
   }
 }

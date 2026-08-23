@@ -106,6 +106,14 @@ export function createApiRouter(deviceManager, navEngine) {
     if (!status) {
       return res.status(404).json({ error: 'Device not found' });
     }
+    // If the device is online but GPS is not yet valid, proactively request a
+    // fresh GPS update from the device. This handles cold-start recovery: after
+    // a server restart the device re-identifies with stale state, and the idle
+    // GPS push (5s interval) may not have fired yet. The request triggers an
+    // immediate GPS_UPDATE response from the ESP.
+    if (status.online && !status.gpsValid) {
+      deviceManager.requestGPS(req.params.id);
+    }
     res.json(status);
   });
 

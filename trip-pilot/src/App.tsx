@@ -201,10 +201,13 @@ function App() {
             } catch { /* ignore */ }
           }
         } else {
-          setDevice(null)
+          // Device not yet registered on the server (e.g. after a server restart
+          // before the ESP reconnects). Show as offline rather than null.
+          setDevice(prev => prev ? { ...prev, online: false, gpsValid: false } : null)
         }
       } catch {
-        setDevice(null)
+        // Network error reaching the server — preserve last known state
+        setDevice(prev => prev ? { ...prev, online: false } : null)
       }
     }
     poll()

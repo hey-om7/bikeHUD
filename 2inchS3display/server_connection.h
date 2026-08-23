@@ -376,10 +376,19 @@ void serverConnectionLoop() {
   // Continuously report the current location to the server so it always has an
   // up-to-date position. Push fast while navigating (drives the closed-loop
   // position-matched frames), and slowly otherwise (keeps the server's known
-  // location fresh for the app / as the routing source). No-op without a fix.
-  if (serverState == SRV_CONNECTED && gpsDataValid) {
+  // location fresh for the app / as the routing source).
+  //
+  // Push ALWAYS (fix or not) so the server tracks the current validity. If we
+  // only pushed while valid, the server would keep the last valid fix forever
+  // after the signal is lost (tunnel/indoors) and the app would show a stale
+  // position. The "valid" flag in each message carries the truth.
+  //   - Fast cadence only while navigating WITH a valid fix (drives closed-loop
+  //     frames; invalid frames aren't useful for map-matching).
+  //   - Idle cadence otherwise, including when we have no fix.
+  if (serverState == SRV_CONNECTED) {
     unsigned long now = millis();
-    unsigned long interval = (navState == NAV_ACTIVE) ? NAV_GPS_PUSH_MS : IDLE_GPS_PUSH_MS;
+    bool navFast = (navState == NAV_ACTIVE && gpsDataValid);
+    unsigned long interval = navFast ? NAV_GPS_PUSH_MS : IDLE_GPS_PUSH_MS;
     if (now - lastGpsPush >= interval) {
       sendGpsUpdate();
       lastGpsPush = now;

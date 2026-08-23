@@ -18,6 +18,7 @@
 extern Arduino_GFX *gfx;
 extern int gpsSatellites;
 extern int gpsSatsInView;
+extern bool gpsFix;
 
 // Navigation display colors
 #define NAV_BG         0x0000   // Black background
@@ -408,7 +409,15 @@ static void drawNavGPSDots() {
   int startX = SCREEN_W - 4 * dotSpacing - 8;
   int dotY = 12;
 
-  int strength = min(max(gpsSatsInView, gpsSatellites) / 2, 4);  // 0-4 dots, based on sats in view
+  // Same fix-based logic as the dashboard: 0 dots without a fix, otherwise
+  // scale with satellites actually used in the solution.
+  int strength = 0;
+  if (gpsFix) {
+    if (gpsSatellites >= 9)      strength = 4;
+    else if (gpsSatellites >= 7) strength = 3;
+    else if (gpsSatellites >= 5) strength = 2;
+    else                         strength = 1;
+  }
 
   for (int i = 0; i < 4; i++) {
     int cx = startX + i * dotSpacing;

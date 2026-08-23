@@ -38,6 +38,7 @@ extern bool hotspotConnected;
 extern bool sosArmed;
 extern int gpsSatellites;
 extern int gpsSatsInView;
+extern bool gpsFix;
 
 // Text color for all dynamic values. Backgrounds are no longer painted as a
 // solid color: each widget restores the real background image underneath, so
@@ -292,16 +293,22 @@ void updateSignalIcon() {
 static int8_t lastGpsStrength = -1;  // -1 = not drawn yet
 
 void updateGPSDots() {
-  // Prefer satellites in view (available during acquisition); fall back to
-  // satellites used if a fix is already contributing more.
-  int sats = max(gpsSatsInView, gpsSatellites);
-
-  // Map satellite count to 0..4 filled dots
+  // Signal strength reflects the REAL fix quality, not raw satellites-in-view.
+  //   - No fix  -> 0 dots. Honest: indoors the module may "see" a few weak
+  //     satellites but has no usable position, so we show nothing.
+  //   - Fix     -> dots scale with the number of satellites actually USED in
+  //     the position solution (GGA field 7), which is a true quality measure:
+  //       4 sats  = minimal 3D fix        -> 1 dot
+  //       5-6     = ok                     -> 2 dots
+  //       7-8     = good                   -> 3 dots
+  //       9+      = excellent open sky     -> 4 dots
   int8_t strength = 0;
-  if (sats >= 8)      strength = 4;
-  else if (sats >= 6) strength = 3;
-  else if (sats >= 4) strength = 2;
-  else if (sats >= 2) strength = 1;
+  if (gpsFix) {
+    if (gpsSatellites >= 9)      strength = 4;
+    else if (gpsSatellites >= 7) strength = 3;
+    else if (gpsSatellites >= 5) strength = 2;
+    else                         strength = 1;  // have a fix, few sats
+  }
 
   if (strength == lastGpsStrength) return;  // unchanged -> skip
 

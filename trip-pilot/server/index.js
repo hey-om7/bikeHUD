@@ -296,6 +296,8 @@ app.get('/health', (req, res) => {
 });
 
 // ===== Dev Mode: Register a simulated device so frontend works without hardware =====
+// Only useful when no real device is connected. The real ESP will overwrite this
+// entry if it connects with the same ID, or register its own TRIP-XXXXXXXX entry.
 function registerSimulatedDevice() {
   // Create a fake WebSocket-like object for the simulated device
   const fakeWs = {
