@@ -242,4 +242,52 @@ export class DeviceManager {
               Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
+
+  // ===== Standalone Backtrack Session =====
+  // Independent of navigation — user explicitly starts/stops recording their path.
+
+  startBacktrackRecording(deviceId, lat, lng) {
+    const device = this.devices.get(deviceId);
+    if (!device) return false;
+    device.backtrackSession = {
+      recording: true,
+      startedAt: Date.now(),
+      trail: [{ lat, lng, t: Date.now() }]
+    };
+    return true;
+  }
+
+  addBacktrackPoint(deviceId, lat, lng) {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.backtrackSession || !device.backtrackSession.recording) return false;
+
+    const trail = device.backtrackSession.trail;
+    if (trail.length > 0) {
+      const last = trail[trail.length - 1];
+      const dist = this._haversineM(last.lat, last.lng, lat, lng);
+      if (dist < 5) return false; // within 5m, skip
+    }
+    trail.push({ lat, lng, t: Date.now() });
+    return true;
+  }
+
+  getBacktrackSession(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) return null;
+    return device.backtrackSession || null;
+  }
+
+  stopBacktrackRecording(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device || !device.backtrackSession) return null;
+    device.backtrackSession.recording = false;
+    return device.backtrackSession;
+  }
+
+  clearBacktrackSession(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (device) {
+      device.backtrackSession = null;
+    }
+  }
 }

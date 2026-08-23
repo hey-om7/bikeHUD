@@ -1249,3 +1249,75 @@ body {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+
+
+/* ===== Backtrack Page ===== */
+.backtrack-recording-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  color: var(--red);
+  background: rgba(224, 48, 48, 0.1);
+}
+
+.backtrack-rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  animation: gps-blink 1s ease-in-out infinite;
+}
+
+.backtrack-nav-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  color: var(--blue);
+  background: rgba(45, 175, 255, 0.1);
+}
+
+.backtrack-idle-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.backtrack-explain {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.backtrack-explain svg {
+  flex-shrink: 0;
+  color: var(--blue);
+  margin-top: 2px;
+}
+
+.backtrack-explain p {
+  margin: 0;
+}
+
+.backtrack-recording-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.backtrack-navigating-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}

@@ -455,5 +455,176 @@ export function createApiRouter(deviceManager, navEngine) {
     }
   });
 
+  // ===== Standalone Backtrack Recording =====
+  // Independent of navigation — user starts recording, walks/rides, then navigates back.
+
+  // POST /api/backtrack/start - start recording the user's path
+  // Body: { deviceId, lat, lng }
+  router.post('/backtrack/start', (req, res) => {
+    const { deviceId, lat, lng } = req.body;
+    if (!deviceId || lat === undefined || lng === undefined) {
+      return res.status(400).json({ error: 'Missing deviceId, lat, or lng' });
+    }
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    deviceManager.startBacktrackRecording(deviceId, parseFloat(lat), parseFloat(lng));
+    console.log(`[BACKTRACK] Started recording for ${deviceId} at (${lat}, ${lng})`);
+    res.json({ success: true });
+  });
+
+  // POST /api/backtrack/record - add a point to the backtrack trail
+  // Body: { deviceId, lat, lng }
+  router.post('/backtrack/record', (req, res) => {
+    const { deviceId, lat, lng } = req.body;
+    if (!deviceId || lat === undefined || lng === undefined) {
+      return res.status(400).json({ error: 'Missing deviceId, lat, or lng' });
+    }
+    const session = deviceManager.getBacktrackSession(deviceId);
+    if (!session || !session.recording) {
+      return res.status(400).json({ error: 'No active backtrack recording' });
+    }
+    const added = deviceManager.addBacktrackPoint(deviceId, parseFloat(lat), parseFloat(lng));
+    res.json({ success: true, added, pointCount: session.trail.length });
+  });
+
+  // GET /api/backtrack/status/:id - get current backtrack session state
+  router.get('/backtrack/status/:id', (req, res) => {
+    const session = deviceManager.getBacktrackSession(req.params.id);
+    if (!session) {
+      return res.json({ active: false });
+    }
+    res.json({
+      active: true,
+      recording: session.recording,
+      pointCount: session.trail.length,
+      startedAt: session.startedAt,
+      trail: session.trail
+    });
+  });
+
+  // POST /api/backtrack/navigate-back - stop recording and start navigation back to start
+  // Body: { deviceId }
+  router.post('/backtrack/navigate-back', async (req, res) => {
+    const { deviceId } = req.body;
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Missing deviceId' });
+    }
+
+    const device = deviceManager.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    if (!device.online) {
+      return res.status(409).json({ error: 'Device is offline' });
+    }
+
+    const session = deviceManager.getBacktrackSession(deviceId);
+    if (!session || session.trail.length < 2) {
+      return res.status(400).json({ error: 'Not enough trail points to navigate back (need at least 2)' });
+    }
+
+    // Stop recording if still active
+    deviceManager.stopBacktrackRecording(deviceId);
+
+    try {
+      // Reverse the trail to navigate back to start
+      const reversedTrail = [...session.trail].reverse();
+      const geometry = reversedTrail.map(p => [p.lng, p.lat]);
+
+      // Detect turn points from heading changes
+      const turnPoints = [];
+      let cumDist = 0;
+      for (let i = 1; i < geometry.length; i++) {
+        const dLat = geometry[i][1] - geometry[i - 1][1];
+        const dLng = geometry[i][0] - geometry[i - 1][0];
+        const segDist = Math.sqrt(dLat * dLat + dLng * dLng) * 111320;
+        cumDist += segDist;
+
+        if (i < geometry.length - 1) {
+          const h1 = Math.atan2(geometry[i][0] - geometry[i - 1][0], geometry[i][1] - geometry[i - 1][1]);
+          const h2 = Math.atan2(geometry[i + 1][0] - geometry[i][0], geometry[i + 1][1] - geometry[i][1]);
+          let angleDiff = (h2 - h1) * 180 / Math.PI;
+          while (angleDiff > 180) angleDiff -= 360;
+          while (angleDiff < -180) angleDiff += 360;
+
+          if (Math.abs(angleDiff) > 35) {
+            let direction;
+            if (angleDiff > 120) direction = 'sharp-left';
+            else if (angleDiff > 45) direction = 'left';
+            else if (angleDiff > 0) direction = 'slight-left';
+            else if (angleDiff < -120) direction = 'sharp-right';
+            else if (angleDiff < -45) direction = 'right';
+            else direction = 'slight-right';
+
+            turnPoints.push({ dist: cumDist, direction, instruction: `Turn ${direction.replace('-', ' ')}` });
+          }
+        }
+      }
+
+      const cum = cumulativeDistances(geometry);
+      const totalDistance = cum[cum.length - 1] || 0;
+
+      const backtrackRoute = {
+        geometry,
+        turnPoints,
+        totalDistance,
+        roads: [],
+        summary: {
+          distance: totalDistance > 1000
+            ? `${(totalDistance / 1000).toFixed(1)} km`
+            : `${Math.round(totalDistance)} m`,
+          duration: '',
+          startAddress: 'Current location',
+          endAddress: 'Start point'
+        }
+      };
+
+      const frames = buildFrames(backtrackRoute);
+
+      const destLat = session.trail[0].lat;
+      const destLng = session.trail[0].lng;
+
+      const started = deviceManager.startNavigation(deviceId, frames, { route: backtrackRoute, cum }, {
+        summary: backtrackRoute.summary,
+        destLat,
+        destLng,
+        isBacktrack: true
+      });
+
+      if (!started) {
+        return res.status(500).json({ error: 'Failed to send backtrack command to device' });
+      }
+
+      // Clear the backtrack session
+      deviceManager.clearBacktrackSession(deviceId);
+
+      res.json({
+        success: true,
+        summary: backtrackRoute.summary,
+        totalChunks: frames.length,
+        pointCount: session.trail.length,
+        trail: session.trail,
+        destLat,
+        destLng
+      });
+    } catch (e) {
+      console.error('[API] Backtrack navigate-back error:', e);
+      res.status(500).json({ error: 'Failed to start backtrack navigation' });
+    }
+  });
+
+  // POST /api/backtrack/stop - stop recording without navigating back (cancel)
+  // Body: { deviceId }
+  router.post('/backtrack/stop', (req, res) => {
+    const { deviceId } = req.body;
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Missing deviceId' });
+    }
+    deviceManager.clearBacktrackSession(deviceId);
+    res.json({ success: true });
+  });
+
   return router;
 }
