@@ -226,7 +226,10 @@ function handleLiveGpsFrame(ws, deviceId, lat, lng) {
   const total = cum[cum.length - 1] || 0;
   if (geometry.length < 2 || total <= 0) return;
 
-  const match = projectOntoRoute(geometry, cum, lat, lng);
+  // Match near the last known position (the route starts at the bike, so 0 is
+  // right for the first fix). Falls back to a whole-route search if nothing in
+  // the window is close.
+  const match = projectOntoRoute(geometry, cum, lat, lng, { distAlong: session.lastDistAlong || 0 });
 
   // Reject wild fixes that are nowhere near the route (keeps a bad GPS sample
   // from yanking the view); the device keeps showing the last good frame.

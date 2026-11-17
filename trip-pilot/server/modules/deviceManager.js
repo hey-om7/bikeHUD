@@ -76,8 +76,26 @@ export class DeviceManager {
       if (hasCoords) {
         device.lat = lat;
         device.lng = lng;
+        device.gpsAt = Date.now();
       }
     }
+  }
+
+  // Ask the device for a fresh fix and wait (bounded) for it to arrive.
+  // Routing used to read device.lat/lng immediately after sending GPS_REQUEST,
+  // i.e. BEFORE the reply, so the route started from wherever the device was
+  // up to one idle push (5 s) or one browser fallback ago. Resolves either way.
+  async requestFreshGPS(deviceId, timeoutMs = 2000) {
+    const device = this.devices.get(deviceId);
+    if (!device) return false;
+    const before = device.gpsAt || 0;
+    this.requestGPS(deviceId);
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if ((device.gpsAt || 0) > before) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
   }
 
   getDevice(deviceId) {

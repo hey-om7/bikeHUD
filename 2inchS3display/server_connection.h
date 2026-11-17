@@ -46,6 +46,12 @@ enum NavState {
 #define MAX_SIDE_PATHS        10
 #define MAX_SIDE_PATH_POINTS  12
 
+// Path coordinates are stored in 1/NAV_SUBPX pixel units. The server sends
+// `subpx` with each frame (frameRenderer.js SUBPX); frames without it are whole
+// pixels and are scaled up on parse. Sub-pixel storage keeps the lerp between
+// frames and the stroke geometry free of 1 px rounding steps.
+#define NAV_SUBPX             4
+
 struct PathPoint {
   int16_t x;
   int16_t y;
@@ -91,8 +97,10 @@ static bool frameBReady = false;  // frameB has valid data to interpolate toward
 static bool frameAValid = false;  // frameA has been populated at least once
 
 // GPS position (populated from real GPS via updateDeviceGPS)
-static float deviceLat = 0.0;
-static float deviceLng = 0.0;
+// double: a 32-bit float only resolves ~1 m at these magnitudes, which showed
+// up as position jitter in the map-matching and therefore in every frame.
+static double deviceLat = 0.0;
+static double deviceLng = 0.0;
 static bool gpsDataValid = false;
 
 // Forward declarations
@@ -198,15 +206,28 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     currentChunk.progress = doc["progress"] | 0.0f;
     currentChunk.isLast = doc["isLast"] | false;
 
-    // Parse mainPath: array of [x, y] screen coordinates
+    // Scale incoming coordinates to NAV_SUBPX units.
+    int srcSubpx = doc["subpx"] | 1;
+    if (srcSubpx < 1) srcSubpx = 1;
+    auto toInternal = [srcSubpx](int32_t v) -> int16_t {
+      int32_t q = (srcSubpx == NAV_SUBPX) ? v : (v * NAV_SUBPX) / srcSubpx;
+      if (q < -32000) q = -32000;
+      if (q >  32000) q =  32000;
+      return (int16_t)q;
+    };
+
+    // Parse mainPath: array of [x, y] screen coordinates.
+    // Write at mainPathCount, not at the loop index: a malformed entry would
+    // otherwise leave a hole of uninitialised coordinates inside the polyline
+    // while still reporting a shorter count, so the stroke jumped to garbage.
     JsonArray mainPath = doc["mainPath"].as<JsonArray>();
     currentChunk.mainPathCount = 0;
     if (mainPath) {
-      for (size_t i = 0; i < mainPath.size() && i < MAX_MAIN_PATH_POINTS; i++) {
+      for (size_t i = 0; i < mainPath.size() && currentChunk.mainPathCount < MAX_MAIN_PATH_POINTS; i++) {
         JsonArray pt = mainPath[i].as<JsonArray>();
         if (pt && pt.size() >= 2) {
-          currentChunk.mainPath[i].x = pt[0].as<int16_t>();
-          currentChunk.mainPath[i].y = pt[1].as<int16_t>();
+          currentChunk.mainPath[currentChunk.mainPathCount].x = toInternal(pt[0].as<int32_t>());
+          currentChunk.mainPath[currentChunk.mainPathCount].y = toInternal(pt[1].as<int32_t>());
           currentChunk.mainPathCount++;
         }
       }
@@ -220,42 +241,41 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     if (sidePaths) {
       for (size_t s = 0; s < sidePaths.size() && s < MAX_SIDE_PATHS; s++) {
         JsonArray sp = sidePaths[s].as<JsonArray>();
-        currentChunk.sidePaths[s].count = 0;
+        uint8_t n = 0;
         // Stable id lets the display interpolate the SAME physical road between
         // frames. Fall back to the slot index if the server didn't send ids.
         currentChunk.sidePaths[s].id = (sideIds && s < sideIds.size())
           ? sideIds[s].as<uint16_t>() : (uint16_t)s;
         if (sp) {
-          for (size_t p = 0; p < sp.size() && p < MAX_SIDE_PATH_POINTS; p++) {
+          for (size_t p = 0; p < sp.size() && n < MAX_SIDE_PATH_POINTS; p++) {
             JsonArray pt = sp[p].as<JsonArray>();
             if (pt && pt.size() >= 2) {
-              currentChunk.sidePaths[s].points[p].x = pt[0].as<int16_t>();
-              currentChunk.sidePaths[s].points[p].y = pt[1].as<int16_t>();
-              currentChunk.sidePaths[s].count++;
+              currentChunk.sidePaths[s].points[n].x = toInternal(pt[0].as<int32_t>());
+              currentChunk.sidePaths[s].points[n].y = toInternal(pt[1].as<int32_t>());
+              n++;
             }
           }
         }
+        currentChunk.sidePaths[s].count = n;
         currentChunk.sidePathCount++;
       }
     }
 
     hasNewChunk = true;
 
-    // Feed the double buffer for smooth interpolation:
-    // If frameA isn't valid yet, this is the very first frame — set it directly.
-    // If frameA is valid but frameB isn't ready, load into frameB (we now have a pair).
-    // If both are valid, promote frameB→frameA and load new data into frameB.
+    // Feed the double buffer for smooth interpolation. The new frame always
+    // becomes the interpolation TARGET (frameB). frameA is not shifted here:
+    // nav_display.h resets it to whatever is on screen right now, so a frame
+    // that lands mid-interpolation continues from the current picture. Shifting
+    // A = old B here made the view jump forward to the old target and restart,
+    // which showed as a stutter on every GPS update that arrived early.
     if (!frameAValid) {
       memcpy(&frameA, &currentChunk, sizeof(NavChunk));
       frameAValid = true;
       frameBReady = false;
-    } else if (!frameBReady) {
+    } else {
       memcpy(&frameB, &currentChunk, sizeof(NavChunk));
       frameBReady = true;
-    } else {
-      memcpy(&frameA, &frameB, sizeof(NavChunk));
-      memcpy(&frameB, &currentChunk, sizeof(NavChunk));
-      // frameBReady stays true
     }
 
     Serial.printf("[NAV] Received chunk %d/%d: %s (%d path pts, %d side roads)\n",
@@ -307,9 +327,11 @@ void handleServerMessage(uint8_t *payload, size_t length) {
 
   // --- DEVICE_UNPAIRED: user unpaired this device from the app ---
   else if (strcmp(msgType, "DEVICE_UNPAIRED") == 0) {
-    Serial.println("[WS] Device unpaired by user — resetting...");
+    Serial.println("[WS] Device unpaired by user — clearing pairing, keeping WiFi...");
+    // Only clear the pairing flag. Keep WiFi credentials: we just proved they
+    // reach the server, so after reboot the device goes straight to the pairing
+    // QR/code screen instead of forcing the user through WiFi setup again.
     clearPairingState();
-    clearCredentials();
     delay(500);
     ESP.restart();
   }
@@ -397,7 +419,7 @@ void serverConnectionLoop() {
 }
 
 // ===== Update GPS coordinates (called from GPS parser or mock) =====
-void updateDeviceGPS(float lat, float lng, bool valid) {
+void updateDeviceGPS(double lat, double lng, bool valid) {
   deviceLat = lat;
   deviceLng = lng;
   gpsDataValid = valid;

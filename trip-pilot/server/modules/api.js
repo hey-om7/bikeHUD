@@ -4,7 +4,7 @@
 
 import { Router } from 'express';
 import { buildFrames } from './frameRenderer.js';
-import { cumulativeDistances } from './navigationEngine.js';
+import { cumulativeDistances, buildTrailRoute } from './navigationEngine.js';
 import { Ride } from '../models/Ride.js';
 import { Device } from '../models/Device.js';
 
@@ -195,8 +195,9 @@ export function createApiRouter(deviceManager, navEngine) {
       return res.status(409).json({ error: 'Device is offline' });
     }
 
-    // Request fresh GPS from device before routing
-    deviceManager.requestGPS(deviceId);
+    // Get a fresh fix from the device before routing (bounded wait), so the
+    // route starts where the bike actually is.
+    await deviceManager.requestFreshGPS(deviceId);
 
     try {
       // Use device's current GPS coordinates (getGPSCoordinates) as source
@@ -220,6 +221,17 @@ export function createApiRouter(deviceManager, navEngine) {
       });
       if (!started) {
         return res.status(500).json({ error: 'Failed to send navigation command to device' });
+      }
+
+      // If Overpass was down when the route was built, the rider is navigating on
+      // the white route alone. Keep retrying in the background: the live session
+      // holds this same `route` object, so once the roads land they show up in the
+      // next rendered frame without touching the session or the device.
+      if (!route.roads || !route.roads.length) {
+        navEngine.ensureRoads(route, { attempts: 4, delayMs: 20000 })
+          .then((roads) => {
+            if (roads.length) console.log(`[NAV] Road layer attached mid-ride (${roads.length} segments)`);
+          });
       }
 
       res.json({
@@ -416,68 +428,12 @@ export function createApiRouter(deviceManager, navEngine) {
     }
 
     try {
-      // Reverse the breadcrumbs to create a route back to the start
+      // Reverse the breadcrumbs so the trail leads back to where we started.
       const reversedCrumbs = [...breadcrumbs].reverse();
-
-      // Convert breadcrumbs to route geometry format: [[lng, lat], ...]
-      const geometry = reversedCrumbs.map(c => [c.lng, c.lat]);
-
-      // Generate turn points by detecting heading changes > 35 degrees
-      const turnPoints = [];
-      let cumDist = 0;
-      for (let i = 1; i < geometry.length; i++) {
-        const dLat = geometry[i][1] - geometry[i - 1][1];
-        const dLng = geometry[i][0] - geometry[i - 1][0];
-        const segDist = Math.sqrt(dLat * dLat + dLng * dLng) * 111320; // rough m
-        cumDist += segDist;
-
-        if (i < geometry.length - 1) {
-          // heading before this point
-          const h1 = Math.atan2(geometry[i][0] - geometry[i - 1][0], geometry[i][1] - geometry[i - 1][1]);
-          // heading after this point
-          const h2 = Math.atan2(geometry[i + 1][0] - geometry[i][0], geometry[i + 1][1] - geometry[i][1]);
-          let angleDiff = (h2 - h1) * 180 / Math.PI;
-          // Normalize to -180..180
-          while (angleDiff > 180) angleDiff -= 360;
-          while (angleDiff < -180) angleDiff += 360;
-
-          if (Math.abs(angleDiff) > 35) {
-            let direction;
-            if (angleDiff > 120) direction = 'sharp-left';
-            else if (angleDiff > 45) direction = 'left';
-            else if (angleDiff > 0) direction = 'slight-left';
-            else if (angleDiff < -120) direction = 'sharp-right';
-            else if (angleDiff < -45) direction = 'right';
-            else direction = 'slight-right';
-
-            turnPoints.push({
-              dist: cumDist,
-              direction,
-              instruction: `Turn ${direction.replace('-', ' ')}`
-            });
-          }
-        }
-      }
-
-      // Calculate total distance
-      const cum = cumulativeDistances(geometry);
-      const totalDistance = cum[cum.length - 1] || 0;
-
-      // Build the route object compatible with the frame renderer
-      const backtrackRoute = {
-        geometry,
-        turnPoints,
-        totalDistance,
-        roads: [], // skip nearby roads for immediate backtrack start
-        summary: {
-          distance: totalDistance > 1000
-            ? `${(totalDistance / 1000).toFixed(1)} km`
-            : `${Math.round(totalDistance)} m`,
-          duration: '', // unknown for backtrack
-          startAddress: 'Current location',
-          endAddress: meta?.summary?.startAddress || 'Start point'
-        }
-      };
+      const backtrackRoute = buildTrailRoute(reversedCrumbs, {
+        endAddress: meta?.summary?.startAddress || 'Start point'
+      });
+      const { cum } = backtrackRoute;
 
       const frames = buildFrames(backtrackRoute);
 
@@ -587,57 +543,10 @@ export function createApiRouter(deviceManager, navEngine) {
     deviceManager.stopBacktrackRecording(deviceId);
 
     try {
-      // Reverse the trail to navigate back to start
+      // Reverse the trail so it leads back to where recording started.
       const reversedTrail = [...session.trail].reverse();
-      const geometry = reversedTrail.map(p => [p.lng, p.lat]);
-
-      // Detect turn points from heading changes
-      const turnPoints = [];
-      let cumDist = 0;
-      for (let i = 1; i < geometry.length; i++) {
-        const dLat = geometry[i][1] - geometry[i - 1][1];
-        const dLng = geometry[i][0] - geometry[i - 1][0];
-        const segDist = Math.sqrt(dLat * dLat + dLng * dLng) * 111320;
-        cumDist += segDist;
-
-        if (i < geometry.length - 1) {
-          const h1 = Math.atan2(geometry[i][0] - geometry[i - 1][0], geometry[i][1] - geometry[i - 1][1]);
-          const h2 = Math.atan2(geometry[i + 1][0] - geometry[i][0], geometry[i + 1][1] - geometry[i][1]);
-          let angleDiff = (h2 - h1) * 180 / Math.PI;
-          while (angleDiff > 180) angleDiff -= 360;
-          while (angleDiff < -180) angleDiff += 360;
-
-          if (Math.abs(angleDiff) > 35) {
-            let direction;
-            if (angleDiff > 120) direction = 'sharp-left';
-            else if (angleDiff > 45) direction = 'left';
-            else if (angleDiff > 0) direction = 'slight-left';
-            else if (angleDiff < -120) direction = 'sharp-right';
-            else if (angleDiff < -45) direction = 'right';
-            else direction = 'slight-right';
-
-            turnPoints.push({ dist: cumDist, direction, instruction: `Turn ${direction.replace('-', ' ')}` });
-          }
-        }
-      }
-
-      const cum = cumulativeDistances(geometry);
-      const totalDistance = cum[cum.length - 1] || 0;
-
-      const backtrackRoute = {
-        geometry,
-        turnPoints,
-        totalDistance,
-        roads: [],
-        summary: {
-          distance: totalDistance > 1000
-            ? `${(totalDistance / 1000).toFixed(1)} km`
-            : `${Math.round(totalDistance)} m`,
-          duration: '',
-          startAddress: 'Current location',
-          endAddress: 'Start point'
-        }
-      };
+      const backtrackRoute = buildTrailRoute(reversedTrail);
+      const { cum } = backtrackRoute;
 
       const frames = buildFrames(backtrackRoute);
 

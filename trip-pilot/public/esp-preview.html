@@ -205,31 +205,47 @@ function drawTurnIcon(cx, cy, dir) {
   else { rect(cx-1,cy-sz,3,sz*2); tri(cx,cy-sz-6,cx-5,cy-sz,cx+5,cy-sz); }
 }
 
+// Mirrors nav_display.h drawDistanceAndTurn(). The firmware uses the built-in
+// Adafruit font (6x8 px cell per size step) and right-aligns the whole
+// number+unit block, with the turn icon to its LEFT. Keeping the same metrics
+// here is the whole point of the preview: it has to show what the panel shows.
 function drawDistanceAndTurn(chunk) {
-  const distY = SCREEN_H/2 - 10;
+  const distY = SCREEN_H/2 - 10;          // 110
   let distBuf, unitBuf;
   if (chunk.distance >= 1000) {
     const km = chunk.distance/1000;
     distBuf = km>=10 ? String(Math.floor(km)) : `${Math.floor(km)}.${Math.floor((km-Math.floor(km))*10)}`;
     unitBuf = 'km';
   } else { distBuf = String(chunk.distance); unitBuf = 'm'; }
-  const numW = distBuf.length*18, unitW = unitBuf.length*12, gap = 4, rightPad = 18;
-  const blockW = numW+gap+unitW;
-  const numX = SCREEN_W-rightPad-blockW, unitX = numX+numW+gap, blockCX = numX+blockW/2;
-  drawTurnIcon(blockCX, distY-24, chunk.direction);
+
+  const NUM_SIZE = 2, UNIT_SIZE = 1;      // firmware setTextSize()
+  const numW  = distBuf.length * 6 * NUM_SIZE;
+  const unitW = unitBuf.length * 6 * UNIT_SIZE;
+  const gap = 4, rightPad = 14;
+  const blockW = numW + gap + unitW;
+  const numX  = SCREEN_W - rightPad - blockW;
+  const unitX = numX + numW + gap;
+
+  drawTurnIcon(numX - 18, distY + 6, chunk.direction);
+
+  // Advance one 6*size cell per glyph, like the built-in font does.
   ctx.textBaseline = 'top';
   ctx.fillStyle = rgb565ToCss(NAV_PATH_COL);
-  ctx.font = '700 26px "Courier New",monospace';
-  ctx.fillText(distBuf, numX, distY-2);
+  ctx.font = `${7 * NUM_SIZE}px "Courier New",monospace`;
+  for (let i = 0; i < distBuf.length; i++) ctx.fillText(distBuf[i], numX + i * 6 * NUM_SIZE, distY);
   ctx.fillStyle = rgb565ToCss(NAV_DIM);
-  ctx.font = '700 17px "Courier New",monospace';
-  ctx.fillText(unitBuf, unitX, distY+8);
+  ctx.font = `${7 * UNIT_SIZE}px "Courier New",monospace`;
+  for (let i = 0; i < unitBuf.length; i++) ctx.fillText(unitBuf[i], unitX + i * 6 * UNIT_SIZE, distY + 8);
 }
 
+// Mirrors nav_display.h drawProgressArc(): the authoritative `progress` field
+// wins, chunkIndex/totalChunks is only the legacy pre-baked fallback.
 function drawProgressArc(chunk) {
   const cx = NAV_CX, cy = 258, rMid = 34;
   const deg = d => d*Math.PI/180;
-  let progress = chunk.totalChunks>0 ? chunk.chunkIndex/chunk.totalChunks : 0;
+  let progress = 0;
+  if (chunk.progress > 0) progress = chunk.progress;
+  else if (chunk.totalChunks > 0) progress = chunk.chunkIndex / chunk.totalChunks;
   progress = Math.min(1, Math.max(0, progress));
   const start=210, end=330, span=end-start;
   ctx.lineWidth=4; ctx.lineCap='butt';
@@ -252,7 +268,15 @@ function drawGPSDots(sats) {
   }
 }
 
-function renderFrame(chunk) {
+// Server coordinates are in 1/subpx pixel units (absent = whole pixels).
+function toPixels(chunk) {
+  const k = 1 / (chunk.subpx || 1);
+  const sc = (pts) => pts.map(([x, y]) => [x * k, y * k]);
+  return { ...chunk, mainPath: sc(chunk.mainPath || []), sidePaths: (chunk.sidePaths || []).map(sc) };
+}
+
+function renderFrame(raw) {
+  const chunk = toPixels(raw);
   ctx.fillStyle = '#000'; ctx.fillRect(0,0,SCREEN_W,SCREEN_H);
   drawSideRoads(chunk);
   drawMainPath(chunk);

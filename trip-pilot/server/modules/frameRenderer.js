@@ -9,8 +9,11 @@
  *   2. Local ground coordinates are projected with a proper tilted pinhole
  *      camera (true 1/depth perspective) so straight roads stay straight and
  *      keep a consistent angle as the rider advances.
- *   3. Anything outside the camera frustum is culled — the tiny CPU only ever
- *      receives the handful of line segments actually visible right now.
+ *   3. Geometry is clipped at the near plane (the rider) and culled at the
+ *      screen edges, so the tiny CPU only ever receives the handful of line
+ *      segments actually visible right now.
+ *   4. Every polyline is resampled to a FIXED point count so the device can
+ *      linearly interpolate point-by-point between two consecutive frames.
  *
  * Two public entry points:
  *   - renderFrameAt(route, cum, distAlong, prevHeading) -> ONE frame. Used for
@@ -32,8 +35,10 @@
 import { cumulativeDistances, haversine } from './navigationEngine.js';
 
 // ===== Screen constants (must match nav_display.h + config.h) =====
+// The panel is 320x240. PATH_BOT_Y / PATH_TOP_Y bracket the drivable band: the
+// projection below maps forward >= 0 into y in [PATH_TOP_Y, PATH_BOT_Y], so no
+// vertical clipping against the panel height is ever needed.
 const SCREEN_W = 320;
-const SCREEN_H = 240;
 const CENTER_X = 160;
 const PATH_TOP_Y = 25;   // horizon line: where forward -> infinity projects
 const PATH_BOT_Y = 175;  // rider origin: where forward = 0 projects
@@ -41,15 +46,47 @@ const PATH_BOT_Y = 175;  // rider origin: where forward = 0 projects
 // ===== Tilted pinhole camera (true perspective) =====
 // Screen mapping for a ground point at (right, forward) meters relative to the
 // rider (forward > 0 is ahead / up the screen):
-//     den = forward + CAM_D0            (depth; >0 everywhere we render)
+//     den = forward + CAM_D0            (depth; >= CAM_D0 everywhere we render)
 //     y   = PATH_TOP_Y + CAM_K / den    (forward=0 -> PATH_BOT_Y, inf -> horizon)
 //     x   = CENTER_X  + right * CAM_LAT_F / den
-// CAM_K and CAM_D0 are chosen so forward=0 -> y=175 and forward=140 -> y~=40.
-const CAM_D0    = 15.5;   // camera distance offset (m) -> controls near compression
-const CAM_K     = (PATH_BOT_Y - PATH_TOP_Y) * CAM_D0; // = 2325 -> forward 0 hits PATH_BOT_Y
-const CAM_LAT_F = 80;     // lateral focal length (px*m) -> horizontal spread/convergence
-const CAM_NEAR_DEN = 3;   // near plane: drop anything with den < this (avoids singularity)
-const HALF_FOV_RAD = 55 * Math.PI / 180; // ~110 deg horizontal field of view
+//
+// This is a projective map of the ground plane, so straight roads project to
+// straight lines for ANY choice of the three constants; they only control how
+// depth is distributed across the panel.
+//
+// CAM_D0 is what sets that distribution, and it is the difference between a
+// readable map and an unreadable one. At CAM_D0 = 15.5 the first 12 m of road
+// filled half the panel height and everything past ~50 m was squeezed into the
+// top 15 px, so upcoming turns were an unreadable smear along the horizon.
+// CAM_D0 = 32 spreads the useful range out instead:
+//     forward   0 m -> y 175   (under the chevron)
+//              25 m -> y 111   (mid panel)
+//             100 m -> y  61
+//             140 m -> y  53
+// CAM_LAT_F is then chosen to match: 160 px/m at the near plane gives a ~89 deg
+// horizontal field of view, so lateral offsets read at a natural scale instead
+// of the fisheye-flat spread the old 80 produced.
+const CAM_D0    = 32;     // camera distance offset (m) -> depth distribution
+const CAM_K     = (PATH_BOT_Y - PATH_TOP_Y) * CAM_D0; // forward 0 hits PATH_BOT_Y
+const CAM_LAT_F = 160;    // lateral focal length (px*m) -> horizontal spread
+
+// Near plane, in FORWARD meters (not in `den`). The rider sits at forward = 0,
+// which projects exactly to (CENTER_X, PATH_BOT_Y).
+//
+// This MUST be clamped at the rider. `den` stays positive for forward down to
+// -CAM_D0, so a naive `den > small` test happily projects points BEHIND the
+// rider — and they land far below the screen (forward = -8 m projects to
+// y = 335 on a 240 px panel). That was the single biggest rendering defect:
+// the white route stroke started off the bottom of the panel and its start
+// point jumped by hundreds of pixels between frames.
+const NEAR_FORWARD_M = 0;
+
+// Horizontal cull margin (px). Anything whose projected x falls outside
+// [-X_MARGIN, SCREEN_W + X_MARGIN] cannot be seen, so it is dropped. Culling on
+// the projected x (rather than on a fixed view angle) means we never throw away
+// geometry that is genuinely on screen — the old 55 deg angular frustum clipped
+// the road immediately after a sharp turn even though it projected to x = 72.
+const X_MARGIN = 40;
 
 // ===== View + framing =====
 const VIEW_RADIUS_M = 140;   // how far ahead we render (a LOCAL view)
@@ -60,11 +97,46 @@ const MAX_FRAMES = 2000;     // safety cap (uint16 chunk index supports far more
 const HEAD_BACK_M = 8;       // look-behind distance for the tangent
 const HEAD_AHEAD_M = 32;     // look-ahead distance for the tangent
 const HEAD_EMA_ALPHA = 0.4;  // circular EMA weight for the new heading (0..1)
+// Hard limit on how far the smoothed heading may deviate from the road
+// IMMEDIATELY ahead. Smoothing over a ~40 m window is what keeps the scene from
+// snap-rotating vertex to vertex, but at a U-turn or hairpin the window average
+// can end up pointing away from the road the rider is actually about to take.
+// The near plane then clips that road away and the white stroke detaches from
+// the chevron. Clamping to the immediate tangent keeps the road ahead in front
+// of the camera while leaving normal riding fully smoothed.
+const HEAD_MAX_DEV_DEG = 60;
+const HEAD_IMMEDIATE_M = 12; // look-ahead used for the immediate tangent
 
 // ===== Device buffer limits (must match server_connection.h on the ESP32) =====
 const MAX_MAIN_PATH_POINTS = 96;
 const MAX_SIDE_PATHS = 10;
 const MAX_SIDE_PATH_POINTS = 12;
+
+// Fixed point counts actually emitted. Every frame carries EXACTLY this many
+// points per polyline (when the polyline is visible at all), evenly spaced by
+// screen arc length. The device lerps frame A -> frame B index by index, so a
+// fixed, arc-length parameterisation is what makes index i mean "the same
+// fraction along the visible stroke" in both frames. With variable counts the
+// same index referred to different ground positions in A and B and the road
+// appeared to slide/wobble sideways instead of advancing.
+const MAIN_PATH_POINTS = 64;   // <= MAX_MAIN_PATH_POINTS
+const SIDE_PATH_POINTS = 8;    // <= MAX_SIDE_PATH_POINTS
+
+// Sub-pixel output. Coordinates are sent as integers in 1/SUBPX pixel units
+// (the frame carries `subpx` so the device and preview know the scale). Whole-
+// pixel rounding on the server was a main source of the jagged, kinked stroke:
+// near the horizon successive points differ by 1-2 px, so rounding turned a
+// smooth curve into a staircase, and the device's per-frame lerp then made
+// those steps shimmer. 1/4 px keeps values well inside int16.
+export const SUBPX = 4;
+const COORD_LIMIT = 8000; // clamp (in sub-px units) so int16 can never overflow
+
+// Light corner rounding for the white route, in ground metres. Provider
+// polylines are piecewise-linear; at the display's scale their vertices show as
+// hard kinks. Two Chaikin passes over the <= DENSIFY_M densified line round a
+// corner over ~1-2 m of road, which reads as a smooth vector curve without
+// moving the road anywhere it isn't.
+const CHAIKIN_PASSES = 2;
 
 // Max ground length (m) of a road segment before we interpolate extra points,
 // so a road crossing the small view window is actually sampled.
@@ -130,59 +202,187 @@ function emaHeading(prevDeg, nextDeg, alpha) {
   return (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360;
 }
 
-/**
- * Project a geographic point into screen space relative to the rider using a
- * tilted pinhole camera. Returns { x, y, forward, right, visible }.
- * `visible` is false if the point is behind the near plane or outside the
- * horizontal field of view.
- */
-function project(lat0, lng0, headingDeg, lat, lng) {
-  const cosLat = Math.cos(lat0 * Math.PI / 180);
-  const north = (lat - lat0) * 111320;
-  const east = (lng - lng0) * 111320 * cosLat;
+/** Signed shortest angular difference a -> b, in degrees (-180..180]. */
+function angleDelta(a, b) {
+  let d = (b - a) % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
 
+/** Pull `deg` to within `maxDev` degrees of `ref`. */
+function clampToward(deg, ref, maxDev) {
+  const d = angleDelta(ref, deg);
+  if (Math.abs(d) <= maxDev) return deg;
+  return (ref + Math.sign(d) * maxDev + 360) % 360;
+}
+
+/**
+ * The camera heading to use at along-route distance `d`: the smoothed tangent,
+ * temporally damped, then clamped to the road immediately ahead.
+ */
+function cameraHeadingAt(geometry, cum, d, prevHeading) {
+  const total = cum[cum.length - 1];
+  const smoothed = emaHeading(prevHeading, headingAt(geometry, cum, d), HEAD_EMA_ALPHA);
+
+  const here = positionAtDistance(geometry, cum, d);
+  const soon = positionAtDistance(geometry, cum, Math.min(total, d + HEAD_IMMEDIATE_M));
+  if (here[0] === soon[0] && here[1] === soon[1]) return smoothed; // at the destination
+  const immediate = bearing(here[1], here[0], soon[1], soon[0]);
+
+  return clampToward(smoothed, immediate, HEAD_MAX_DEV_DEG);
+}
+
+// ---- Camera ----
+
+/**
+ * Build the rider-local frame for one anchor: origin at (lat0,lng0), +forward
+ * along `headingDeg`, +right 90 deg clockwise from it.
+ */
+function makeCamera(lat0, lng0, headingDeg) {
   const h = headingDeg * Math.PI / 180;
-  const sinH = Math.sin(h), cosH = Math.cos(h);
-  const forward = east * sinH + north * cosH;
-  const right = east * cosH - north * sinH;
-
-  const den = forward + CAM_D0;
-
-  let visible = true;
-  if (den < CAM_NEAR_DEN) visible = false;
-  // Frustum: cull by horizontal angle rather than a lateral box, so roads far
-  // abeam of a forward-facing camera are not drawn sweeping across the bottom.
-  const ang = Math.atan2(right, Math.max(forward, 0.001));
-  if (Math.abs(ang) > HALF_FOV_RAD) visible = false;
-
-  const x = CENTER_X + (right * CAM_LAT_F) / den;
-  const y = PATH_TOP_Y + CAM_K / den;
-
-  return { x, y, forward, right, visible };
+  return {
+    lat0, lng0,
+    sinH: Math.sin(h),
+    cosH: Math.cos(h),
+    cosLat0: Math.cos(lat0 * Math.PI / 180)
+  };
 }
 
-function onScreen(x, y) {
-  return x >= -40 && x <= SCREEN_W + 40 && y >= PATH_TOP_Y - 10 && y <= SCREEN_H + 20;
+/** Geographic point -> rider-local ground meters { forward, right }. */
+function toLocal(cam, lat, lng) {
+  const north = (lat - cam.lat0) * 111320;
+  const east = (lng - cam.lng0) * 111320 * cam.cosLat0;
+  return {
+    forward: east * cam.sinH + north * cam.cosH,
+    right: east * cam.cosH - north * cam.sinH
+  };
+}
+
+/** Rider-local ground meters -> screen pixels (tilted pinhole). */
+function projectLocal(forward, right) {
+  const den = forward + CAM_D0;   // >= CAM_D0 because forward >= NEAR_FORWARD_M
+  return {
+    x: CENTER_X + (right * CAM_LAT_F) / den,
+    y: PATH_TOP_Y + CAM_K / den
+  };
 }
 
 /**
- * Uniformly decimate a polyline to at most `max` points, keeping endpoints.
+ * Where a segment crosses the near plane, in local coordinates. Used so a road
+ * that runs past the rider terminates exactly on the rider line instead of
+ * being truncated at densify granularity (or, worse, wrapping off-screen).
  */
-function cap(points, max) {
-  if (points.length <= max) return points;
-  const out = [];
-  const stride = (points.length - 1) / (max - 1);
-  for (let i = 0; i < max; i++) out.push(points[Math.round(i * stride)]);
-  return out;
+function crossNearPlane(a, b) {
+  const span = b.forward - a.forward;
+  if (Math.abs(span) < 1e-9) return null;
+  const t = (NEAR_FORWARD_M - a.forward) / span;
+  if (t < 0 || t > 1) return null;
+  return { forward: NEAR_FORWARD_M, right: a.right + (b.right - a.right) * t };
 }
 
 function pushDedup(arr, x, y) {
   const last = arr[arr.length - 1];
-  if (!last) { arr.push([x, y]); return; }
-  const dx = x - last[0];
-  const dy = y - last[1];
-  if ((dx * dx + dy * dy) < 0.25) return; // drop sub-pixel duplicates
-  arr.push([Math.round(x), Math.round(y)]);
+  if (last && Math.abs(last[0] - x) < 0.25 && Math.abs(last[1] - y) < 0.25) return;
+  arr.push([x, y]);
+}
+
+/** Float screen px -> clamped integer sub-px units for the wire format. */
+function toSubpx(v) {
+  const q = Math.round(v * SUBPX);
+  return q < -COORD_LIMIT ? -COORD_LIMIT : (q > COORD_LIMIT ? COORD_LIMIT : q);
+}
+
+/**
+ * Project a [[lng,lat], ...] polyline into visible screen-space runs.
+ *
+ * Pipeline: geographic -> rider-local ground -> clip at the near plane ->
+ * project -> split wherever the line leaves the horizontal frustum.
+ *
+ * @returns {Array<{pts: Array<[number,number]>, score: number}>}
+ *   `score` is the closest ground distance reached by that run (used to rank
+ *   surrounding roads by proximity).
+ */
+function projectPolyline(poly, cam) {
+  const local = new Array(poly.length);
+  for (let i = 0; i < poly.length; i++) {
+    local[i] = toLocal(cam, poly[i][1], poly[i][0]);
+  }
+
+  // --- 1. Clip against forward >= NEAR_FORWARD_M, keeping runs contiguous ---
+  const clipped = [];
+  let run = null;
+  for (let i = 0; i < local.length; i++) {
+    const p = local[i];
+    if (p.forward >= NEAR_FORWARD_M) {
+      if (!run) {
+        run = [];
+        if (i > 0) {
+          const c = crossNearPlane(local[i - 1], p);
+          if (c) run.push(c);
+        }
+      }
+      run.push(p);
+    } else if (run) {
+      const c = crossNearPlane(local[i - 1], p);
+      if (c) run.push(c);
+      clipped.push(run);
+      run = null;
+    }
+  }
+  if (run) clipped.push(run);
+
+  // --- 2. Project, and split on horizontal frustum exit ---
+  const out = [];
+  for (const r of clipped) {
+    let pts = [];
+    let score = Infinity;
+    const flush = () => {
+      if (pts.length >= 2) out.push({ pts, score });
+      pts = [];
+      score = Infinity;
+    };
+    for (const p of r) {
+      const s = projectLocal(p.forward, p.right);
+      if (s.x < -X_MARGIN || s.x > SCREEN_W + X_MARGIN) { flush(); continue; }
+      pushDedup(pts, s.x, s.y);
+      const d = Math.hypot(p.forward, p.right);
+      if (d < score) score = d;
+    }
+    flush();
+  }
+  return out;
+}
+
+/**
+ * Resample a screen-space polyline to EXACTLY `n` points, evenly spaced by
+ * screen arc length, endpoints preserved. See MAIN_PATH_POINTS for why the
+ * count has to be fixed.
+ */
+function resample(pts, n) {
+  if (pts.length < 2) return pts.map((p) => [toSubpx(p[0]), toSubpx(p[1])]);
+  const cumLen = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cumLen.push(cumLen[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  }
+  const total = cumLen[cumLen.length - 1];
+  const q = (p) => [toSubpx(p[0]), toSubpx(p[1])];
+  // Degenerate (all points coincide): a 2-point stub is enough to draw.
+  if (total < 1) return [q(pts[0]), q(pts[pts.length - 1])];
+
+  const out = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const d = (total * k) / (n - 1);
+    while (j < cumLen.length - 2 && cumLen[j + 1] < d) j++;
+    const segLen = cumLen[j + 1] - cumLen[j] || 1;
+    const t = (d - cumLen[j]) / segLen;
+    out.push(q([
+      pts[j][0] + (pts[j + 1][0] - pts[j][0]) * t,
+      pts[j][1] + (pts[j + 1][1] - pts[j][1]) * t
+    ]));
+  }
+  return out;
 }
 
 /**
@@ -206,28 +406,86 @@ function densify(poly) {
 
 // ---- Per-frame builders ----
 
+/** Chaikin corner cutting on rider-local {forward,right} points, endpoints kept. */
+function chaikin(pts, passes) {
+  let p = pts;
+  for (let k = 0; k < passes && p.length > 2; k++) {
+    const out = [p[0]];
+    for (let i = 0; i < p.length - 1; i++) {
+      const a = p[i], b = p[i + 1];
+      out.push({ forward: 0.75 * a.forward + 0.25 * b.forward, right: 0.75 * a.right + 0.25 * b.right });
+      out.push({ forward: 0.25 * a.forward + 0.75 * b.forward, right: 0.25 * a.right + 0.75 * b.right });
+    }
+    out.push(p[p.length - 1]);
+    p = out;
+  }
+  return p;
+}
+
 /**
  * Build the white route polyline visible from this anchor: the stretch of the
- * route from the rider to VIEW_RADIUS_M ahead, projected + culled.
+ * route from the rider's exact position to VIEW_RADIUS_M ahead.
+ *
+ * Sampling is uniform in GROUND distance along the route, not in screen arc
+ * length. Point i is always "i * step metres ahead of the rider", so between two
+ * consecutive frames index i refers to nearly the same piece of road and the
+ * device's point-by-point lerp is a true camera move. With screen-arc sampling
+ * the meaning of index i changed whenever the visible length changed (a turn
+ * leaving the screen, a curve foreshortening), and the lerp bent and tore the
+ * stroke between frames.
+ *
+ * The main path is NOT culled at the screen edges. The device clips while
+ * rasterising, so keeping off-screen points costs nothing and the point count
+ * stays fixed; cutting at the edge was what made the stroke end abruptly and
+ * pop as the road swung in and out of view. It is cut only where the road goes
+ * behind the rider (hairpins), since such points cannot be projected.
  */
-function buildMainPath(geometry, cum, anchorDist, lat0, lng0, heading) {
-  const from = anchorDist - 2;              // tiny tail so the stroke starts at the rider
-  const to = anchorDist + VIEW_RADIUS_M;
+function buildMainPath(geometry, cum, anchorDist, cam) {
+  const total = cum[cum.length - 1];
+  const to = Math.min(total, anchorDist + VIEW_RADIUS_M);
+  if (to - anchorDist < 0.5) return [];
 
-  const window = [];
+  // Route window in geographic coords, starting exactly at the rider.
+  const window = [positionAtDistance(geometry, cum, anchorDist)];
   for (let i = 0; i < geometry.length; i++) {
-    if (cum[i] < from) { if (cum[i + 1] !== undefined && cum[i + 1] >= from) window.push(geometry[i]); continue; }
-    if (cum[i] > to) { window.push(geometry[i]); break; }
+    if (cum[i] <= anchorDist) continue;
+    if (cum[i] >= to) break;
     window.push(geometry[i]);
   }
+  window.push(positionAtDistance(geometry, cum, to));
 
-  const pts = [];
-  for (const [lng, lat] of densify(window)) {
-    const p = project(lat0, lng0, heading, lat, lng);
-    if (!p.visible) continue;
-    pushDedup(pts, p.x, p.y);
+  // Densify, convert to rider-local metres, round the corners.
+  const local = chaikin(densify(window).map((p) => toLocal(cam, p[1], p[0])), CHAIKIN_PASSES);
+
+  // Ground arc length of the local polyline.
+  const glen = [0];
+  for (let i = 1; i < local.length; i++) {
+    glen.push(glen[i - 1] + Math.hypot(local[i].forward - local[i - 1].forward, local[i].right - local[i - 1].right));
   }
-  return cap(pts, MAX_MAIN_PATH_POINTS);
+  const gTotal = glen[glen.length - 1];
+  if (gTotal < 0.5) return [];
+
+  const n = Math.min(MAIN_PATH_POINTS, MAX_MAIN_PATH_POINTS);
+  const out = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const g = (gTotal * k) / (n - 1);
+    while (j < glen.length - 2 && glen[j + 1] < g) j++;
+    const segLen = glen[j + 1] - glen[j] || 1;
+    const t = Math.min(1, Math.max(0, (g - glen[j]) / segLen));
+    const a = local[j], b = local[j + 1];
+    let fwd = a.forward + (b.forward - a.forward) * t;
+    const rgt = a.right + (b.right - a.right) * t;
+    // The first point is the rider (forward = 0); a hair below 0 is float noise.
+    if (k === 0) fwd = Math.max(fwd, NEAR_FORWARD_M);
+    if (fwd < NEAR_FORWARD_M) break; // road goes behind the rider: stop here
+    const s = projectLocal(fwd, rgt);
+    out.push([toSubpx(s.x), toSubpx(s.y)]);
+  }
+  if (out.length < 2) return [];
+  // Invariant: the stroke starts under the chevron.
+  out[0] = [CENTER_X * SUBPX, PATH_BOT_Y * SUBPX];
+  return out;
 }
 
 /**
@@ -239,45 +497,36 @@ function buildMainPath(geometry, cum, anchorDist, lat0, lng0, heading) {
  *
  * Returns { paths: [[[x,y]...]...], ids: [id...] }, closest roads first.
  */
-function buildSidePaths(roads, lat0, lng0, heading) {
-  const runs = [];
+function buildSidePaths(roads, cam) {
+  const candidates = [];
   for (let ri = 0; ri < roads.length; ri++) {
-    const road = roads[ri];
-    // Collect the single best (closest) contiguous visible run for this road.
-    let cur = [];
-    let curScore = Infinity;
-    let best = null; // { pts, score }
-    const flush = () => {
-      if (cur.length >= 2 && curScore < (best ? best.score : Infinity)) {
-        best = { pts: cap(cur, MAX_SIDE_PATH_POINTS), score: curScore };
-      }
-      cur = [];
-      curScore = Infinity;
-    };
-    for (const [lng, lat] of densify(road)) {
-      const p = project(lat0, lng0, heading, lat, lng);
-      if (p.visible && onScreen(p.x, p.y)) {
-        pushDedup(cur, p.x, p.y);
-        const score = Math.abs(p.forward) + Math.abs(p.right);
-        if (score < curScore) curScore = score;
-      } else {
-        flush();
-      }
+    // Keep only the single closest visible run of this road.
+    let best = null;
+    for (const r of projectPolyline(densify(roads[ri]), cam)) {
+      if (!best || r.score < best.score) best = r;
     }
-    flush();
-    if (best) runs.push({ pts: best.pts, score: best.score, id: ri });
+    if (best) candidates.push({ pts: best.pts, score: best.score, id: ri });
   }
-  runs.sort((a, b) => a.score - b.score); // nearest roads first
-  const picked = runs.slice(0, MAX_SIDE_PATHS);
+  candidates.sort((a, b) => a.score - b.score); // nearest roads first
+  const picked = candidates.slice(0, MAX_SIDE_PATHS);
+  const n = Math.min(SIDE_PATH_POINTS, MAX_SIDE_PATH_POINTS);
   return {
-    paths: picked.map((r) => r.pts),
+    paths: picked.map((r) => resample(r.pts, n)),
     ids: picked.map((r) => r.id)
   };
 }
 
+/**
+ * The next maneuver at along-route distance `dist`.
+ *
+ * Only maneuvers still ahead of the rider count. The small negative tolerance
+ * holds the callout up while the bike is physically inside the junction, then
+ * the next maneuver takes over. (Maneuvers already behind the rider used to be
+ * selected, so the display showed a turn that had just been completed at 0 m.)
+ */
 function turnInfoAt(turnPoints, dist) {
   for (const tp of turnPoints) {
-    if (tp.dist >= dist - 1) {
+    if (tp.dist >= dist - 5) {
       return {
         direction: tp.direction || 'S',
         distance: Math.max(0, Math.round(tp.dist - dist)),
@@ -307,16 +556,17 @@ export function renderFrameAt(route, cum, distAlong, prevHeading = null) {
 
   const [lng0, lat0] = positionAtDistance(geometry, cum, d);
 
-  // Spatially-smoothed tangent, then temporally-smoothed on the unit circle.
-  const rawHeading = headingAt(geometry, cum, d);
-  const heading = emaHeading(prevHeading, rawHeading, HEAD_EMA_ALPHA);
+  // Spatially-smoothed tangent, temporally damped, clamped to the road ahead.
+  const heading = cameraHeadingAt(geometry, cum, d, prevHeading);
 
-  const mainPath = buildMainPath(geometry, cum, d, lat0, lng0, heading);
-  const side = buildSidePaths(roads, lat0, lng0, heading);
+  const cam = makeCamera(lat0, lng0, heading);
+  const mainPath = buildMainPath(geometry, cum, d, cam);
+  const side = buildSidePaths(roads, cam);
   const turn = turnInfoAt(turnPoints, d);
 
   const frame = {
     type: 'NAV_CHUNK',
+    subpx: SUBPX,       // coordinates below are in 1/subpx pixel units
     mainPath,
     sidePaths: side.paths,
     sideIds: side.ids,
@@ -352,7 +602,12 @@ export function buildFrames(route) {
 
   const anchors = [];
   for (let d = 0; d < total; d += step) anchors.push(d);
-  anchors.push(total);
+  // Final anchor sits a couple of metres short of the destination. Anchored
+  // exactly at `total` there is nothing ahead of the rider to draw, so the frame
+  // would carry an empty mainPath and the road would simply vanish on the last
+  // frame of the preview.
+  const lastAnchor = Math.max(0, total - 2);
+  if (!anchors.length || anchors[anchors.length - 1] < lastAnchor) anchors.push(lastAnchor);
 
   const frames = [];
   let prevHeading = null;

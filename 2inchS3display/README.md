@@ -115,7 +115,7 @@ Install via **Sketch → Include Library → Manage Libraries**:
 
 > **Note**: The QRCode library conflicts with ESP-IDF's built-in `qrcode.h`. The project includes `qrcode_ricmoo.h` and `qrcode_ricmoo.cpp` (renamed copies) to avoid this conflict. Do NOT delete these files.
 
-Built-in (no install needed): WiFi, WebServer, DNSServer, Preferences, Wire, SPI
+Built-in (no install needed): WiFi, WebServer, DNSServer, Preferences, Wire, SPI, FS, SD
 
 ## Project Files
 
@@ -130,7 +130,8 @@ Built-in (no install needed): WiFi, WebServer, DNSServer, Preferences, Wire, SPI
 ├── ui_screens.h              # WiFi setup, connecting, connected screens
 ├── dashboard.h               # Main telemetry dashboard rendering
 ├── nav_display.h             # Turn-by-turn navigation display
-├── sensors.h                 # IMU & GPS drivers
+├── sensors.h                 # IMU & GPS drivers (+ GPS UTC date/time from RMC)
+├── trip_saver.h              # Automatic ride logger (GPX → microSD)
 ├── air_quality.h             # Air quality API integration
 ├── qrcode_ricmoo.h           # QR code library (renamed to avoid ESP-IDF conflict)
 ├── qrcode_ricmoo.cpp         # QR code library implementation
@@ -154,6 +155,87 @@ Built-in (no install needed): WiFi, WebServer, DNSServer, Preferences, Wire, SPI
 - **Server Status**: Signal icon (on/off) based on WebSocket connection
 - **GPS Strength**: 4 orange dots (top-right corner) based on satellite count
 - **Navigation**: Smooth interpolated path rendering when route is active
+
+## Automatic Trip Saver (GPX logging to microSD)
+
+The firmware records every ride automatically to the onboard microSD/TF card as
+a standard **GPX 1.1** track — no "start trip" button. Tracking begins the
+moment real GPS movement is detected and finalises automatically when the bike
+has been stopped long enough. It runs entirely in the background from the main
+loop and never blocks the display, GPS, navigation, or server communication.
+
+### How it works
+
+- **Auto start**: when there is a GPS fix, a valid UTC time (from the GPS RMC
+  sentence), and ground speed ≥ `TRIP_MOVE_SPEED_KMH`, a new file is opened and
+  the starting position is logged.
+- **RAM buffering + batch writes**: points are collected in a small RAM buffer
+  and *batch-appended* to the card about every `TRIP_FLUSH_INTERVAL_MS` (default
+  30 s), or sooner if the buffer fills. This keeps card wear to a handful of
+  writes per ride instead of one write per GPS fix.
+- **Simplification / filtering**: a new point is only recorded once the bike has
+  moved at least `TRIP_MIN_MOVE_METERS` from the last recorded point and at most
+  once per `TRIP_MIN_POINT_INTERVAL_MS`. Implausible GPS jumps larger than
+  `TRIP_MAX_JUMP_METERS` are rejected so they don't corrupt the distance total.
+- **Auto stop**: after `TRIP_INACTIVITY_TIMEOUT_MS` (default 2 min) with no
+  movement, the remaining buffer is flushed, a summary is written, and the file
+  is closed.
+
+### Files & format
+
+- One file per ride under `/TRIPS/`, named from the ride start time (UTC):
+  `/TRIPS/YYYY-MM-DD_HH-MM-SS.gpx`.
+- Each file is valid GPX with `<metadata><time>` (start), a `<trk>/<trkseg>` of
+  `<trkpt>` points carrying latitude, longitude, `<ele>` (altitude), `<time>`
+  (ISO-8601 UTC), and a `<speed>` extension (m/s).
+- On finalise a trailing XML comment records the summary:
+  `start`, `end`, `duration` (s), `distance` (km), and `points`. Start/end times,
+  duration, and distance are therefore all recoverable from the file.
+
+### Power-cut & reset safety
+
+- Writes are **append-only** and the file is flushed and closed after every
+  batch, so a sudden power loss discards at most the last un-flushed batch
+  (≤ `TRIP_FLUSH_INTERVAL_MS` of data) — never the whole ride.
+- The active filename and running totals are mirrored in NVS. On the next boot
+  `tripSaverInit()` detects an interrupted ride and **finalises** it (appends the
+  GPX closing tags and a recovered summary) instead of leaving a corrupt or
+  unterminated file.
+- If the card is missing or the SD pins are wrong, the feature disables itself
+  silently and the rest of the firmware is unaffected.
+
+### ⚠️ Verify the SD card pins before flashing
+
+This board mounts its TF card over SPI, but the exact GPIOs are not published in
+plain form on the Waveshare wiki (the demo hides them behind macros in its
+`pin_config.h`). The defaults in `config.h` are **placeholders** and must be
+confirmed against the Waveshare `03_sd_card_test` demo or the board schematic:
+
+```cpp
+#define TRIP_SD_SCLK_PIN  14   // <-- VERIFY (SD CLK / SCK)
+#define TRIP_SD_MOSI_PIN  17   // <-- VERIFY (SD CMD / DI / MOSI)
+#define TRIP_SD_MISO_PIN  16   // <-- VERIFY (SD DAT0 / DO / MISO)
+#define TRIP_SD_CS_PIN    21   // <-- VERIFY (SD DAT3 / CS)
+```
+
+The Trip Saver uses a **dedicated HSPI bus**, so it never shares the ST7789
+display's SPI bus. If your board wires the card onto the display's data pins,
+set these to those pins accordingly.
+
+### Configuration (all in `config.h`)
+
+| Define | Default | Purpose |
+|--------|---------|---------|
+| `TRIP_SAVER_ENABLED` | `1` | Set to `0` to compile the feature out |
+| `TRIP_DIR` | `"/TRIPS"` | Directory for ride files |
+| `TRIP_FLUSH_INTERVAL_MS` | `30000` | Batch-write interval |
+| `TRIP_MAX_BUFFER_POINTS` | `64` | RAM buffer size (forces a flush when full) |
+| `TRIP_MIN_POINT_INTERVAL_MS` | `1000` | Minimum spacing between recorded points |
+| `TRIP_MOVE_SPEED_KMH` | `3.0` | Speed considered "moving" (start/keep-alive) |
+| `TRIP_MIN_MOVE_METERS` | `6.0` | Minimum movement to record a new point |
+| `TRIP_MAX_JUMP_METERS` | `500.0` | Reject GPS glitches larger than this |
+| `TRIP_INACTIVITY_TIMEOUT_MS` | `120000` | Idle time before a ride auto-finalises |
+| `TRIP_SD_*_PIN`, `TRIP_SD_FREQ_HZ` | see above | microSD SPI pins & clock |
 
 ## Icon Conversion Tool
 

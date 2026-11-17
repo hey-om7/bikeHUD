@@ -15,6 +15,7 @@
 
 #include "config.h"
 #include "sensors.h"
+#include "agps.h"
 #include "wifi_provision.h"
 #include "ui_screens.h"
 #include "server_connection.h"
@@ -22,6 +23,7 @@
 #include "dashboard.h"
 #include "nav_display.h"
 #include "device_pairing.h"
+#include "trip_saver.h"
 
 // ===== Display Setup =====
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
@@ -36,8 +38,8 @@ float pitchIncline = 0.0;
 float rollTilt = 0.0;
 float gpsAltitude = 1060.0;
 float gpsHeading = 0.0;
-float gpsLat = 0.0;         // decimal degrees; set by real GPS fix
-float gpsLng = 0.0;         // decimal degrees; set by real GPS fix
+double gpsLat = 0.0;         // decimal degrees; set by real GPS fix
+double gpsLng = 0.0;         // decimal degrees; set by real GPS fix
 float gpsSpeed = 0.0;      // ground speed, km/h
 int   gpsSatellites = 0;
 int   gpsSatsInView = 0;
@@ -107,6 +109,9 @@ void goToDashboard() {
   imuConnected = qmi8658_init();
   lastIMURead = millis();  // Prevent huge dt on first imu_update call
   initDashboard();
+  // Mount the microSD and arm the automatic Trip Saver. Safe no-op if no card
+  // is present or the TRIP_SD_* pins are wrong (the feature simply disables).
+  tripSaverInit();
   appState = STATE_DASHBOARD;
   stateStartTime = millis();
 }
@@ -120,6 +125,13 @@ void loop() {
   // setup / pairing phase, so the module's fix data is live and correct the
   // moment the dashboard opens.
   gpsPump(gpsSerial);
+
+  // A-GPS: the instant WiFi (STA) is connected, inject AssistNow ephemeris +
+  // rough position + time into the NEO-7M so it can achieve a near-instant
+  // (open-sky) fix instead of a ~30s unassisted cold start. Runs once per
+  // connection (then honours AGPS_REFRESH_MS). No-op when WiFi is down, in
+  // which case the module simply performs its normal cold start.
+  agpsMaybeInject(gpsSerial);
 
   switch (appState) {
 
@@ -181,8 +193,12 @@ void loop() {
         gfx->setCursor(50, 206);
         gfx->print("RESETTING...");
 
-        // Erase stored WiFi credentials
+        // Full factory reset: erase WiFi credentials AND the local pairing flag.
+        // Clearing only WiFi left paired=true, so a device that was unpaired
+        // from the web app while offline went straight back to the dashboard
+        // instead of the pairing screen after re-provisioning.
         clearCredentials();
+        clearPairingState();
 
         // Stop AP
         WiFi.softAPdisconnect(true);
@@ -284,9 +300,18 @@ void loop() {
     case STATE_DASHBOARD:
       // GPS is drained by gpsPump() at the top of loop(), in every state.
 
+      // Automatic Trip Saver: detect movement, buffer the route in RAM and
+      // batch-append it to the microSD as GPX. Fully non-blocking; runs in both
+      // dashboard and navigation views (both live inside STATE_DASHBOARD).
+      tripSaverLoop();
+
       // Print live GPS coordinates to the serial monitor (throttled to 5s,
       // and immediately when a fix is first acquired).
       gpsPrintStatus(5000);
+
+      // Persist the live fix (throttled) so the NEXT boot can seed A-GPS with a
+      // rough starting position for an even faster assisted fix.
+      agpsCacheFixThrottled(30000);
 
       // Read IMU at 50Hz (gyro + accel complementary filter)
       if (imuConnected && (now - lastIMURead >= 20)) {

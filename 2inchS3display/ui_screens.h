@@ -232,36 +232,81 @@ void showConnectedScreen() {
 
 // ===== Stored WiFi Connecting Screen =====
 // Shown on boot when reconnecting to a previously saved network
-void showReconnectingScreen() {
-  gfx->fillScreen(0x10A3);
+// Layout (320x240): brand header -> glowing WiFi emblem -> title + saved
+// network pill -> progress dots -> footer hint with the reset/re-setup path.
+// Pass the saved SSID to show which network is being sought (optional).
 
-  // Title
-  gfx->setTextSize(2);
-  gfx->setTextColor(COL_ORANGE);
-  gfx->setCursor(70, 50);
-  gfx->print("TRIPPER");
+// Print text horizontally centred on the screen (default font: 6px/char * size)
+static void printCentered(const char* text, int y, uint8_t size, uint16_t color) {
+  gfx->setTextSize(size);
+  gfx->setTextColor(color);
+  int w = strlen(text) * 6 * size;
+  gfx->setCursor((SCREEN_W - w) / 2, y);
+  gfx->print(text);
+}
 
-  // WiFi icon
+void showReconnectingScreen(const char* ssid = nullptr) {
+  const uint16_t BG        = 0x10A3;  // app-wide dark slate
+  const uint16_t GLOW_OUT  = 0x1904;  // faint halo rings behind the emblem
+  const uint16_t GLOW_IN   = 0x2166;
+  const uint16_t CARD      = 0x2945;
+  const uint16_t DIVIDER   = 0x3186;
+  const uint16_t MUTED     = 0x8C71;
+  const uint16_t SOFT      = 0xB596;
+
+  gfx->fillScreen(BG);
+
+  // --- Header: brand + subtitle (matches pairing screen) ---
+  printCentered("TRIPPER", 6, 1, COL_ORANGE);
+  printCentered("Network Recovery", 18, 1, MUTED);
+  gfx->drawFastHLine(40, 30, SCREEN_W - 80, DIVIDER);
+
+  // --- Emblem: layered halo + proper WiFi fan ---
   int cx = SCREEN_W / 2;
-  gfx->drawCircle(cx, 100, 16, COL_BLUE);
-  gfx->drawCircle(cx, 100, 10, COL_BLUE);
-  gfx->fillCircle(cx, 100, 4, COL_WHITE);
+  int cy = 96;  // centre of the fan's pivot area
+  gfx->fillCircle(cx, cy - 8, 50, GLOW_OUT);
+  gfx->fillCircle(cx, cy - 8, 40, GLOW_IN);
 
-  // Status
-  gfx->setTextSize(1);
-  gfx->setTextColor(COL_BLUE);
-  gfx->setCursor(68, 130);
-  gfx->print("Reconnecting to WiFi...");
+  // Arcs open upward (Arduino_GFX angles: 0 = 3 o'clock, clockwise; 270 = up).
+  // Inner two are lit, outer one dimmed to suggest a signal being searched for.
+  gfx->fillArc(cx, cy + 4, 34, 29, 225, 315, COL_BLUE_DIM);
+  gfx->fillArc(cx, cy + 4, 24, 19, 225, 315, COL_BLUE);
+  gfx->fillArc(cx, cy + 4, 14,  9, 225, 315, COL_BLUE);
+  gfx->fillCircle(cx, cy + 4, 4, COL_WHITE);
 
-  // Hint
-  gfx->setTextColor(0x8C71);
-  gfx->setCursor(52, 160);
-  gfx->print("Ensure your hotspot is active");
+  // --- Title ---
+  printCentered("Reconnecting", 150, 2, COL_WHITE);
 
-  // Loading
-  gfx->setTextColor(COL_ORANGE);
-  gfx->setCursor(110, 195);
-  gfx->print("Please wait");
+  // --- Saved network pill ---
+  if (ssid && ssid[0]) {
+    char label[34];
+    snprintf(label, sizeof(label), "%.24s", ssid);  // keep pill within width
+    int textW = strlen(label) * 6;
+    int pillW = textW + 28;
+    int pillX = (SCREEN_W - pillW) / 2;
+    int pillY = 172;
+    gfx->fillRoundRect(pillX, pillY, pillW, 16, 8, CARD);
+    gfx->fillCircle(pillX + 9, pillY + 8, 3, COL_ORANGE);  // status dot
+    gfx->setTextSize(1);
+    gfx->setTextColor(SOFT);
+    gfx->setCursor(pillX + 18, pillY + 4);
+    gfx->print(label);
+  } else {
+    printCentered("Searching for your saved network", 176, 1, SOFT);
+  }
+
+  // --- Progress dots (static: centre highlighted) ---
+  int dotY = 200;
+  gfx->fillCircle(cx - 14, dotY, 3, DIVIDER);
+  gfx->fillCircle(cx,      dotY, 4, COL_ORANGE);
+  gfx->fillCircle(cx + 14, dotY, 3, DIVIDER);
+
+  // --- Footer: what to do if the network is gone ---
+  gfx->drawFastHLine(40, 212, SCREEN_W - 80, DIVIDER);
+  printCentered("Turn on your hotspot, or join", 218, 1, MUTED);
+  char hint[48];
+  snprintf(hint, sizeof(hint), "\"%s\" to set up new WiFi", AP_SSID);
+  printCentered(hint, 229, 1, MUTED);
 }
 
 #endif // UI_SCREENS_H

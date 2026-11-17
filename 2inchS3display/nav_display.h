@@ -3,7 +3,7 @@
  * Tripper Telemetry Dashboard V5
  *
  * Consumes pre-calculated screen coordinates from the Node.js server.
- * Renders smooth Bezier paths, side roads, 3D chevron, distance/turn, progress arc.
+ * Renders the route as a continuous tapered ribbon, side roads, 3D chevron, distance/turn, progress arc.
  * Full black canvas — no clutter.
  */
 #ifndef NAV_DISPLAY_H
@@ -54,8 +54,12 @@ static uint16_t navBlend565(uint16_t c0, uint16_t c1, float f) {
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-// Solid thick line: rasterizes parallel drawLine passes along the segment
-// normal. Round joins/caps are added separately by the caller via fillCircle.
+// Solid thick line. The quad spanned by the segment and its normal is filled
+// with two triangles, which is both gap-free and cheaper than rasterising one
+// drawLine per offset. The previous approach stepped INTEGER offsets along the
+// normal, and on a diagonal segment those offsets collapse into duplicates and
+// leave holes — the white route came out looking beaded rather than solid.
+// Round joins/caps are added separately by the caller via fillCircle.
 static void navThickLine(int x0, int y0, int x1, int y1, int thickness, uint16_t color) {
   if (thickness < 1) thickness = 1;
   float dx = x1 - x0;
@@ -65,23 +69,22 @@ static void navThickLine(int x0, int y0, int x1, int y1, int thickness, uint16_t
     gfx->fillCircle(x0, y0, thickness / 2, color);
     return;
   }
-  float nx = -dy / len;
-  float ny = dx / len;
-  int half = thickness / 2;
-  for (int i = -half; i <= half; i++) {
-    gfx->drawLine(x0 + (int)(nx * i), y0 + (int)(ny * i),
-                  x1 + (int)(nx * i), y1 + (int)(ny * i), color);
+  if (thickness <= 1) {
+    gfx->drawLine(x0, y0, x1, y1, color);
+    return;
   }
-}
 
-// Perspective stroke width for a given screen Y (thicker near the rider).
-static int navPathThickness(int y) {
-  float t = (float)(NAV_PATH_BOT_Y - y) / (float)(NAV_PATH_BOT_Y - NAV_PATH_TOP_Y);
-  if (t < 0.0f) t = 0.0f;
-  if (t > 1.0f) t = 1.0f;
-  int th = (int)(PATH_MAX_THICK - t * (PATH_MAX_THICK - PATH_MIN_THICK) + 0.5f);
-  if (th < PATH_MIN_THICK) th = PATH_MIN_THICK;
-  return th;
+  float h = thickness * 0.5f;
+  float nx = (-dy / len) * h;
+  float ny = (dx / len) * h;
+
+  int ax = (int)lroundf(x0 + nx), ay = (int)lroundf(y0 + ny);
+  int bx = (int)lroundf(x1 + nx), by = (int)lroundf(y1 + ny);
+  int cx = (int)lroundf(x1 - nx), cy = (int)lroundf(y1 - ny);
+  int ex = (int)lroundf(x0 - nx), ey = (int)lroundf(y0 - ny);
+
+  gfx->fillTriangle(ax, ay, bx, by, cx, cy, color);
+  gfx->fillTriangle(ax, ay, cx, cy, ex, ey, color);
 }
 
 static bool navDisplayActive = false;
@@ -120,9 +123,10 @@ static void navCanvasFree() {
 
 // ===== Smooth Animation Parameters =====
 // Duration (ms) to interpolate between two consecutive GPS-driven server frames.
-// The server pushes a new frame every ~600ms (NAV_GPS_PUSH_MS cadence), so this
-// controls how smoothly the display transitions between those real-position frames.
-#define NAV_FRAME_DURATION_MS  700
+// Tied to the GPS push cadence so a cycle finishes exactly as the next real
+// frame lands. When this was longer than the push interval the interpolation was
+// always cut short, so the view permanently trailed the true position.
+#define NAV_FRAME_DURATION_MS  NAV_GPS_PUSH_MS
 
 // Target render interval (~30fps). The display redraws the interpolated state
 // at this cadence for smooth visual transitions between server-pushed frames.
@@ -133,11 +137,20 @@ static unsigned long interpStartTime = 0;   // millis() when current interpolati
 static float interpT = 0.0f;                 // 0.0 = showing frameA, 1.0 = showing frameB
 static NavChunk interpChunk;                 // The interpolated frame rendered each tick
 static bool interpRunning = false;           // Are we actively interpolating?
+// Copy of exactly what is on the panel right now. When a new server frame
+// arrives, interpolation restarts FROM this state, so there is never a jump.
+static NavChunk navShown;
+static bool navShownValid = false;
 
 // ===== Interpolation: Lerp Between Two NavChunks =====
 // Generates a blended NavChunk at parameter t (0..1) between frames A and B.
-// Points are linearly interpolated; counts use the minimum of both frames so
-// we never read past valid data. Direction/instruction snap from A (t<0.5) or B.
+//
+// This is a point-by-point lerp, which is only meaningful because the server
+// emits every polyline with a FIXED point count, evenly spaced by screen arc
+// length (see MAIN_PATH_POINTS / SIDE_PATH_POINTS in frameRenderer.js). Index i
+// therefore refers to the same fraction along the visible stroke in both frames.
+// Counts still use the minimum of both frames so we never read past valid data.
+// Direction/instruction snap from A (t<0.5) or B.
 static void lerpNavChunks(NavChunk* a, NavChunk* b, float t, NavChunk* out) {
   // Clamp
   if (t < 0.0f) t = 0.0f;
@@ -195,38 +208,92 @@ static void lerpNavChunks(NavChunk* a, NavChunk* b, float t, NavChunk* out) {
     strlcpy(out->direction, b->direction, sizeof(out->direction));
   }
   out->distanceMeters = (uint16_t)(a->distanceMeters * invT + b->distanceMeters * t + 0.5f);
-  out->bearing = (int16_t)(a->bearing * invT + b->bearing * t + 0.5f);
+  // Shortest-way blend so 359 -> 1 does not sweep through 180.
+  int16_t db = (int16_t)(((b->bearing - a->bearing) % 360 + 540) % 360 - 180);
+  out->bearing = (int16_t)(((int)lroundf(a->bearing + db * t) % 360 + 360) % 360);
   out->progress = a->progress * invT + b->progress * t;
   out->chunkIndex = (t < 0.5f) ? a->chunkIndex : b->chunkIndex;
   out->totalChunks = a->totalChunks;  // Same for both
   out->isLast = b->isLast;
 }
 
-// ===== Draw Main Path (Continuous Solid Stroke) =====
-// Renders the server-provided polyline as ONE connected vector stroke:
-//  - consecutive points joined with a solid thick line (no gaps, no dots)
-//  - a filled circle at every vertex/endpoint gives round joins and round caps
-//  - stroke width tapers with perspective (wide near rider, thin toward horizon)
+// ===== Draw Main Path (Continuous Ribbon) =====
+// Points arrive in 1/NAV_SUBPX pixel units, evenly spaced in ground distance.
+//
+// The stroke is built as ONE ribbon: every vertex gets a left/right edge point
+// offset along the averaged normal of its two neighbouring segments, with a
+// width that tapers smoothly (float) with screen depth. Each pair of
+// consecutive vertices is filled as a quad that SHARES its edge points with the
+// next quad, so there are no seams. The previous version drew every segment as
+// an independent rectangle with its own integer width; adjacent rectangles had
+// different widths and different end normals, which showed as notches and
+// breaks along the white route, especially on curves.
+static float navPathHalfWidth(float y) {
+  float t = (NAV_PATH_BOT_Y - y) / (float)(NAV_PATH_BOT_Y - NAV_PATH_TOP_Y);
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  float th = PATH_MAX_THICK - t * (PATH_MAX_THICK - PATH_MIN_THICK);
+  return th * 0.5f;
+}
+
 static void drawMainPath(NavChunk* chunk) {
-  if (chunk->mainPathCount < 2) return;
+  const uint8_t n = chunk->mainPathCount;
+  if (n < 2) return;
 
-  for (uint8_t i = 0; i < chunk->mainPathCount - 1; i++) {
-    int16_t x0 = chunk->mainPath[i].x;
-    int16_t y0 = chunk->mainPath[i].y;
-    int16_t x1 = chunk->mainPath[i + 1].x;
-    int16_t y1 = chunk->mainPath[i + 1].y;
+  static float px[MAX_MAIN_PATH_POINTS], py[MAX_MAIN_PATH_POINTS], hw[MAX_MAIN_PATH_POINTS];
+  static int16_t lx[MAX_MAIN_PATH_POINTS], ly[MAX_MAIN_PATH_POINTS];
+  static int16_t rx[MAX_MAIN_PATH_POINTS], ry[MAX_MAIN_PATH_POINTS];
+  const float k = 1.0f / NAV_SUBPX;
 
-    int th = navPathThickness((y0 + y1) / 2);
-
-    // Solid segment + round join at its start vertex (also caps the origin).
-    navThickLine(x0, y0, x1, y1, th, NAV_PATH);
-    gfx->fillCircle(x0, y0, th / 2, NAV_PATH);
+  for (uint8_t i = 0; i < n; i++) {
+    px[i] = chunk->mainPath[i].x * k;
+    py[i] = chunk->mainPath[i].y * k;
+    hw[i] = navPathHalfWidth(py[i]);
   }
 
-  // Round cap at the final (far) point.
-  uint8_t last = chunk->mainPathCount - 1;
-  int thEnd = navPathThickness(chunk->mainPath[last].y);
-  gfx->fillCircle(chunk->mainPath[last].x, chunk->mainPath[last].y, thEnd / 2, NAV_PATH);
+  for (uint8_t i = 0; i < n; i++) {
+    // Tangent from neighbours (one-sided at the ends).
+    uint8_t a = (i > 0) ? i - 1 : i;
+    uint8_t b = (i < n - 1) ? i + 1 : i;
+    float tx = px[b] - px[a], ty = py[b] - py[a];
+    float len = sqrtf(tx * tx + ty * ty);
+    float nx = 0.0f, ny = 0.0f;
+    if (len > 1e-3f) { nx = -ty / len; ny = tx / len; }
+    lx[i] = (int16_t)lroundf(px[i] + nx * hw[i]);
+    ly[i] = (int16_t)lroundf(py[i] + ny * hw[i]);
+    rx[i] = (int16_t)lroundf(px[i] - nx * hw[i]);
+    ry[i] = (int16_t)lroundf(py[i] - ny * hw[i]);
+  }
+
+  for (uint8_t i = 0; i < n - 1; i++) {
+    // Skip quads entirely outside the panel (the server keeps off-screen points
+    // so the count stays fixed for interpolation).
+    float m = hw[i] > hw[i + 1] ? hw[i] : hw[i + 1];
+    float minX = fminf(px[i], px[i + 1]) - m, maxX = fmaxf(px[i], px[i + 1]) + m;
+    float minY = fminf(py[i], py[i + 1]) - m, maxY = fmaxf(py[i], py[i + 1]) + m;
+    if (maxX < 0 || minX >= SCREEN_W || maxY < 0 || minY >= SCREEN_H) continue;
+
+    gfx->fillTriangle(lx[i], ly[i], lx[i + 1], ly[i + 1], rx[i + 1], ry[i + 1], NAV_PATH);
+    gfx->fillTriangle(lx[i], ly[i], rx[i + 1], ry[i + 1], rx[i], ry[i], NAV_PATH);
+
+    // Averaged normals narrow the ribbon at a sharp bend; a disc at that vertex
+    // fills the outer corner. Only where the direction actually changes, so a
+    // straight road stays pure quads.
+    if (i > 0) {
+      float ax = px[i] - px[i - 1], ay = py[i] - py[i - 1];
+      float bx = px[i + 1] - px[i], by = py[i + 1] - py[i];
+      float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+      if (la > 1e-3f && lb > 1e-3f && (ax * bx + ay * by) / (la * lb) < 0.94f) {   // > ~20 deg
+        int r = (int)(hw[i] + 0.5f);
+        if (r >= 1) gfx->fillCircle((int)lroundf(px[i]), (int)lroundf(py[i]), r, NAV_PATH);
+      }
+    }
+  }
+
+  // Round caps at both ends.
+  int r0 = (int)(hw[0] + 0.5f), r1 = (int)(hw[n - 1] + 0.5f);
+  gfx->fillCircle((int)lroundf(px[0]), (int)lroundf(py[0]), r0, NAV_PATH);
+  if (r1 >= 1) gfx->fillCircle((int)lroundf(px[n - 1]), (int)lroundf(py[n - 1]), r1, NAV_PATH);
 }
 
 // ===== Draw Surrounding Roads (Thin, Solid, Gray) =====
@@ -241,10 +308,10 @@ static void drawSideRoads(NavChunk* chunk) {
     if (sp->count < 2) continue;
 
     for (uint8_t i = 0; i < sp->count - 1; i++) {
-      int16_t x0 = sp->points[i].x;
-      int16_t y0 = sp->points[i].y;
-      int16_t x1 = sp->points[i + 1].x;
-      int16_t y1 = sp->points[i + 1].y;
+      int16_t x0 = (sp->points[i].x + NAV_SUBPX / 2) / NAV_SUBPX;
+      int16_t y0 = (sp->points[i].y + NAV_SUBPX / 2) / NAV_SUBPX;
+      int16_t x1 = (sp->points[i + 1].x + NAV_SUBPX / 2) / NAV_SUBPX;
+      int16_t y1 = (sp->points[i + 1].y + NAV_SUBPX / 2) / NAV_SUBPX;
 
       // Steady gray for all surrounding roads. Slightly dimmer/thinner toward
       // the top of the frame (farther away) for a gentle depth cue, but never
@@ -463,6 +530,9 @@ void drawNavScreen(NavChunk* chunk) {
     gfx = realGfx;
     navCanvas->flush();
   }
+
+  if (chunk != &navShown) memcpy(&navShown, chunk, sizeof(NavChunk));
+  navShownValid = true;
 }
 
 // ===== Draw Navigation Complete Screen =====
@@ -497,6 +567,7 @@ void drawNavComplete() {
 void enterNavMode() {
   navDisplayActive = true;
   interpRunning = false;
+  navShownValid = false;
   interpT = 0.0f;
   lastNavRender = 0;
 
@@ -520,6 +591,7 @@ void enterNavMode() {
 void exitNavMode() {
   navDisplayActive = false;
   interpRunning = false;
+  navShownValid = false;
   navCanvasFree();     // reclaim the framebuffer memory
   clearNavigation();
 }
@@ -549,8 +621,10 @@ bool navDisplayLoop() {
       // Check if navigation is complete (destination reached)
       checkNavComplete();
 
-      // If we now have both frames, start (or restart) interpolation
+      // If we now have both frames, start (or restart) interpolation from
+      // whatever is on screen right now (mid-lerp state included).
       if (isFrameBReady()) {
+        if (navShownValid) memcpy(getFrameA(), &navShown, sizeof(NavChunk));
         interpStartTime = now;
         interpT = 0.0f;
         interpRunning = true;

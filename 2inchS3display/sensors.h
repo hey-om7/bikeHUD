@@ -6,6 +6,7 @@
 #define SENSORS_H
 
 #include <Wire.h>
+#include <time.h>
 #include "config.h"
 
 // ===== Telemetry State (extern, defined in main) =====
@@ -13,8 +14,8 @@ extern float pitchIncline;
 extern float rollTilt;
 extern float gpsAltitude;
 extern float gpsHeading;
-extern float gpsLat;        // decimal degrees (real GPS fix)
-extern float gpsLng;        // decimal degrees (real GPS fix)
+extern double gpsLat;        // decimal degrees (real GPS fix)
+extern double gpsLng;        // decimal degrees (real GPS fix)
 extern float gpsSpeed;      // ground speed, km/h (from RMC)
 extern int   gpsSatellites;    // satellites USED in the fix (from GGA)
 extern int   gpsSatsInView;    // satellites IN VIEW (from GSV) - signal strength
@@ -157,17 +158,48 @@ const char* getCardinalDirection(float course) {
 
 // Convert an NMEA "ddmm.mmmm" / "dddmm.mmmm" coordinate token + hemisphere
 // character into signed decimal degrees. Returns NAN on a malformed/empty token.
-static float nmeaToDecimal(const String &token, char hemi) {
+static double nmeaToDecimal(const String &token, char hemi) {
   if (token.length() < 3) return NAN;
   int dotIdx = token.indexOf('.');
   if (dotIdx < 3) return NAN;  // need at least dd + mm before the decimal
   // Degrees are all digits before the last two whole-minute digits.
   int degDigits = dotIdx - 2;
-  float deg = token.substring(0, degDigits).toFloat();
-  float minutes = token.substring(degDigits).toFloat();
-  float dec = deg + minutes / 60.0f;
+  double deg = token.substring(0, degDigits).toDouble();
+  double minutes = token.substring(degDigits).toDouble();
+  double dec = deg + minutes / 60.0;
   if (hemi == 'S' || hemi == 'W') dec = -dec;
   return dec;
+}
+
+// ===== GPS UTC date/time (parsed from RMC) =====
+// The RMC sentence carries both UTC time (field 1: hhmmss.sss) and date
+// (field 9: ddmmyy). We keep the most recent valid values so features that need
+// a wall-clock timestamp (e.g. the Trip Saver's filenames) work even with no
+// WiFi/NTP. Values are UTC.
+static int  gpsUtcYear = 0, gpsUtcMonth = 0, gpsUtcDay = 0;
+static int  gpsUtcHour = 0, gpsUtcMin = 0, gpsUtcSec = 0;
+static bool gpsDateValid = false;
+static bool gpsTimeValid = false;
+
+// Convert a proleptic-Gregorian civil date to days since 1970-01-01 (Howard
+// Hinnant's algorithm). Valid for any reasonable year; avoids relying on the
+// platform's timegm(), which is not always available in the Arduino core.
+static long gpsDaysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+// Returns true and fills `epochOut` with the current UTC epoch (seconds) if a
+// full valid GPS date+time has been received; false otherwise.
+bool gpsGetUtcEpoch(time_t &epochOut) {
+  if (!gpsDateValid || !gpsTimeValid) return false;
+  long days = gpsDaysFromCivil(gpsUtcYear, (unsigned)gpsUtcMonth, (unsigned)gpsUtcDay);
+  epochOut = (time_t)(days * 86400L + gpsUtcHour * 3600L + gpsUtcMin * 60L + gpsUtcSec);
+  return true;
 }
 
 void parseNMEA(String line) {
@@ -188,8 +220,8 @@ void parseNMEA(String line) {
       tokenIdx++; start = end + 1; end = line.indexOf(',', start);
     }
     if (gpsFix && latTok.length() > 0 && lngTok.length() > 0) {
-      float lat = nmeaToDecimal(latTok, latHemi);
-      float lng = nmeaToDecimal(lngTok, lngHemi);
+      double lat = nmeaToDecimal(latTok, latHemi);
+      double lng = nmeaToDecimal(lngTok, lngHemi);
       if (!isnan(lat) && !isnan(lng)) { gpsLat = lat; gpsLng = lng; }
     }
   } else if (line.startsWith("$GPRMC") || line.startsWith("$GNRMC")) {
@@ -198,23 +230,40 @@ void parseNMEA(String line) {
     float tempHeading = -1.0;
     String latTok = "", lngTok = "";
     char latHemi = 0, lngHemi = 0, status = 0;
+    String timeTok = "", dateTok = "";
     while (end != -1) {
       String token = line.substring(start, end);
-      if (tokenIdx == 2 && token.length() > 0) status = token[0];  // 'A'=valid, 'V'=void
+      if (tokenIdx == 1) timeTok = token;                            // hhmmss(.sss) UTC
+      else if (tokenIdx == 2 && token.length() > 0) status = token[0];  // 'A'=valid, 'V'=void
       else if (tokenIdx == 3) latTok = token;
       else if (tokenIdx == 4 && token.length() > 0) latHemi = token[0];
       else if (tokenIdx == 5) lngTok = token;
       else if (tokenIdx == 6 && token.length() > 0) lngHemi = token[0];
       else if (tokenIdx == 7 && token.length() > 0) gpsSpeed = token.toFloat() * 1.852f;  // knots -> km/h
       else if (tokenIdx == 8 && token.length() > 0) tempHeading = token.toFloat();
+      else if (tokenIdx == 9) dateTok = token;                       // ddmmyy UTC
       tokenIdx++; start = end + 1; end = line.indexOf(',', start);
     }
     if (status == 'A') {
       gpsFix = true;
       if (latTok.length() > 0 && lngTok.length() > 0) {
-        float lat = nmeaToDecimal(latTok, latHemi);
-        float lng = nmeaToDecimal(lngTok, lngHemi);
+        double lat = nmeaToDecimal(latTok, latHemi);
+        double lng = nmeaToDecimal(lngTok, lngHemi);
         if (!isnan(lat) && !isnan(lng)) { gpsLat = lat; gpsLng = lng; }
+      }
+      // Extract UTC time (hhmmss) — the fractional seconds are ignored.
+      if (timeTok.length() >= 6) {
+        gpsUtcHour = timeTok.substring(0, 2).toInt();
+        gpsUtcMin  = timeTok.substring(2, 4).toInt();
+        gpsUtcSec  = timeTok.substring(4, 6).toInt();
+        gpsTimeValid = true;
+      }
+      // Extract UTC date (ddmmyy → full year 2000+yy).
+      if (dateTok.length() >= 6) {
+        gpsUtcDay   = dateTok.substring(0, 2).toInt();
+        gpsUtcMonth = dateTok.substring(2, 4).toInt();
+        gpsUtcYear  = 2000 + dateTok.substring(4, 6).toInt();
+        if (gpsUtcDay >= 1 && gpsUtcMonth >= 1 && gpsUtcMonth <= 12) gpsDateValid = true;
       }
     }
     // Course over ground is only meaningful when actually moving.

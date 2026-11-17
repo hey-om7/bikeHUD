@@ -22,8 +22,8 @@
 #include <ArduinoJson.h>
 
 // Real GPS fix (defined in main .ino, parsed in sensors.h).
-extern float gpsLat;
-extern float gpsLng;
+extern double gpsLat;
+extern double gpsLng;
 extern bool  gpsFix;
 
 // Fallback location used only until the first satellite fix arrives.
