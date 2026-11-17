@@ -16,7 +16,7 @@ import { DeviceManager } from './modules/deviceManager.js';
 import { NavigationEngine } from './modules/navigationEngine.js';
 import { createApiRouter } from './modules/api.js';
 import { renderFrameAt } from './modules/frameRenderer.js';
-import { projectOntoRoute } from './modules/navigationEngine.js';
+import { projectOntoRoute, cumulativeDistances, positionAlong, buildTrailRoute } from './modules/navigationEngine.js';
 import { connectDB } from './modules/db.js';
 import { createAuthRouter } from './modules/auth.js';
 import { createDevicePairingRouter, handleDeviceRegister } from './modules/devicePairing.js';
@@ -214,12 +214,12 @@ function handleDeviceMessage(ws, msg) {
 // route, renders ONE frame at that position (heading smoothed across updates),
 // and pushes it. This is what makes the display track the real bike position
 // and speed instead of a fixed timer.
-function handleLiveGpsFrame(ws, deviceId, lat, lng) {
+function handleLiveGpsFrame(ws, deviceId, lat, lng, { breadcrumb = true } = {}) {
   const session = deviceManager.getNavSession(deviceId);
   if (!session || !session.route || !session.cum) return; // no closed-loop context
 
   // Record breadcrumb for backtracking
-  deviceManager.addBreadcrumb(deviceId, lat, lng, 'esp');
+  if (breadcrumb) deviceManager.addBreadcrumb(deviceId, lat, lng, 'esp');
 
   const geometry = session.route.geometry || [];
   const cum = session.cum;
@@ -231,9 +231,22 @@ function handleLiveGpsFrame(ws, deviceId, lat, lng) {
   // the window is close.
   const match = projectOntoRoute(geometry, cum, lat, lng, { distAlong: session.lastDistAlong || 0 });
 
-  // Reject wild fixes that are nowhere near the route (keeps a bad GPS sample
-  // from yanking the view); the device keeps showing the last good frame.
-  if (match.offMeters > 60) return;
+  // Off-route detection. One bad fix must not trigger a reroute (GPS multipath
+  // near buildings easily throws a single sample 50 m), so we require
+  // OFF_ROUTE_FIXES consecutive fixes beyond OFF_ROUTE_M. While off route the
+  // device keeps the last good frame; frames resume on the new route.
+  if (match.offMeters > OFF_ROUTE_M) {
+    session.offRouteCount = (session.offRouteCount || 0) + 1;
+    if (session.offRouteCount >= OFF_ROUTE_FIXES) {
+      triggerReroute(ws, deviceId, session, lat, lng);
+    }
+    // Fixes slightly off (lane offset, wide junction) still render normally;
+    // far-off fixes would only drag the camera to the wrong place.
+    if (match.offMeters > 60 || session.rerouting) return;
+  } else {
+    session.offRouteCount = 0;
+  }
+  if (session.rerouting) return; // new route is on its way
 
   // Never step backwards along the route on noise; allow a small tolerance.
   let d = match.distAlong;
@@ -254,6 +267,75 @@ function handleLiveGpsFrame(ws, deviceId, lat, lng) {
     const session = deviceManager.completeNavigation(deviceId);
     saveRide(deviceId, session);
     console.log(`[NAV] Device ${deviceId} reached destination (live GPS)`);
+  }
+}
+
+// ===== Rerouting =====
+const OFF_ROUTE_M = 40;              // perpendicular distance that counts as off route
+const OFF_ROUTE_FIXES = 3;           // consecutive off-route fixes (~1.8 s at 600 ms)
+const REROUTE_COOLDOWN_MS = 15000;   // min gap between reroute attempts
+const BACKTRACK_REJOIN_AHEAD_M = 60; // rejoin the trail this far past the last match
+
+// Build a new route from the bike's current position and swap it into the live
+// session. Runs async; frames for the old route are suppressed meanwhile.
+//
+//  - Normal navigation: a fresh provider route to the original destination.
+//  - Backtrack: the point is to retrace the ridden trail, so we route back to
+//    the trail a little ahead of where the rider left it and splice the rest of
+//    the trail on, instead of letting the provider pick a different road home.
+async function triggerReroute(ws, deviceId, session, lat, lng) {
+  if (session.rerouting) return;
+  if (Date.now() - (session.lastRerouteAt || 0) < REROUTE_COOLDOWN_MS) return;
+  session.rerouting = true;
+  session.lastRerouteAt = Date.now();
+  sendToDevice(ws, { type: 'REROUTING' });
+  console.log(`[NAV] ${deviceId} off route at (${lat}, ${lng}), rerouting...`);
+
+  try {
+    let route;
+    if (session.isBacktrack) {
+      const oldGeom = session.route.geometry;
+      const oldCum = session.cum;
+      const total = oldCum[oldCum.length - 1];
+      const rejoinD = Math.min(total, (session.lastDistAlong || 0) + BACKTRACK_REJOIN_AHEAD_M);
+      const [rjLng, rjLat] = positionAlong(oldGeom, oldCum, rejoinD);
+      const link = await navEngine.generateRoute(lat, lng, rjLat, rjLng, { waitForRoads: false });
+      const pts = link.geometry.map(([g, a]) => ({ lat: a, lng: g }));
+      for (let i = 0; i < oldGeom.length; i++) {
+        if (oldCum[i] > rejoinD) pts.push({ lat: oldGeom[i][1], lng: oldGeom[i][0] });
+      }
+      route = buildTrailRoute(pts, {
+        startAddress: 'Current location',
+        endAddress: session.summary?.endAddress || 'Start point'
+      });
+    } else {
+      if (session.destLat == null || session.destLng == null) throw new Error('session has no destination');
+      route = await navEngine.generateRoute(lat, lng, session.destLat, session.destLng, { waitForRoads: false });
+    }
+
+    // The ride may have been stopped/completed/replaced while we waited.
+    if (deviceManager.getNavSession(deviceId) !== session) return;
+
+    session.route = route;
+    session.cum = route.cum || cumulativeDistances(route.geometry);
+    session.lastDistAlong = 0;
+    session.offRouteCount = 0;
+    session.summary = route.summary;
+    session.reroutes = (session.reroutes || 0) + 1;
+    session.reroutedAt = Date.now();
+    // prevHeading is kept on purpose: the camera turns smoothly onto the new route.
+    console.log(`[NAV] ${deviceId} rerouted (#${session.reroutes}): ${route.summary.distance}, ${route.summary.duration}`);
+  } catch (e) {
+    console.error(`[NAV] Reroute failed for ${deviceId}: ${e.message}`);
+    sendToDevice(ws, { type: 'REROUTE_FAILED' });
+  } finally {
+    session.rerouting = false;
+  }
+
+  // Push a frame on the new route right away instead of waiting for the next fix.
+  const device = deviceManager.getDevice(deviceId);
+  if (device && device.gpsValid && deviceManager.getNavSession(deviceId) === session) {
+    handleLiveGpsFrame(ws, deviceId, device.lat, device.lng, { breadcrumb: false });
   }
 }
 

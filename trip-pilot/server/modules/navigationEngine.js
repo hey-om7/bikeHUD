@@ -80,7 +80,7 @@ export class NavigationEngine {
    * geometry is taken verbatim from whichever provider answers; we never
    * synthesise it. Throws if BOTH providers fail.
    */
-  async generateRoute(sourceLat, sourceLng, destLat, destLng) {
+  async generateRoute(sourceLat, sourceLng, destLat, destLng, { waitForRoads = true } = {}) {
     const key = this._cacheKey(sourceLat, sourceLng, destLat, destLng);
     const hit = this.routeCache.get(key);
     if (hit && Date.now() - hit.at < ROUTE_CACHE_TTL_MS) {
@@ -109,6 +109,14 @@ export class NavigationEngine {
     }
 
     // Fetch surrounding roads for the gray context layer (best-effort).
+    // A mid-ride reroute can't wait for Overpass (up to ~40 s across mirrors):
+    // it returns the route at once and the roads attach in the background. The
+    // live session holds this same object, so they appear in later frames.
+    if (!waitForRoads) {
+      route.roads = route.roads || [];
+      this.ensureRoads(route, { attempts: 3, delayMs: 10000 }).catch(() => {});
+      return route; // not cached: no road layer yet
+    }
     await this.ensureRoads(route);
 
     // Only cache once the roads layer is attached, so a cache hit is a complete
@@ -504,6 +512,20 @@ export function cumulativeDistances(geometry) {
     cum.push(cum[i - 1] + haversine(lat0, lng0, lat1, lng1));
   }
   return cum;
+}
+
+/** Interpolated [lng,lat] at along-route distance `d` (clamped to the route). */
+export function positionAlong(geometry, cum, d) {
+  const total = cum[cum.length - 1];
+  if (d <= 0) return geometry[0];
+  if (d >= total) return geometry[geometry.length - 1];
+  let i = 0;
+  while (i < geometry.length - 2 && cum[i + 1] < d) i++;
+  const t = (d - cum[i]) / ((cum[i + 1] - cum[i]) || 1);
+  return [
+    geometry[i][0] + (geometry[i + 1][0] - geometry[i][0]) * t,
+    geometry[i][1] + (geometry[i + 1][1] - geometry[i][1]) * t
+  ];
 }
 
 /**

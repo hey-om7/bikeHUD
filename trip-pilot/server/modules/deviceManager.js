@@ -188,7 +188,10 @@ export class DeviceManager {
       summary: s.summary || null,
       destLat: s.destLat ?? null,
       destLng: s.destLng ?? null,
-      startedAt: s.startedAt
+      startedAt: s.startedAt,
+      rerouting: !!s.rerouting,
+      reroutes: s.reroutes || 0,
+      reroutedAt: s.reroutedAt || null
     };
   }
 

@@ -496,6 +496,16 @@ static void drawNavGPSDots() {
   }
 }
 
+// ===== "Rerouting" Banner (top-left, orange) =====
+static void drawReroutingBanner() {
+  gfx->setFont(NULL);
+  gfx->fillRoundRect(6, 4, 92, 18, 4, NAV_ACCENT);
+  gfx->setTextSize(1);
+  gfx->setTextColor(NAV_BG);
+  gfx->setCursor(14, 9);
+  gfx->print("REROUTING...");
+}
+
 // ===== Draw Navigation Screen (Main Render) =====
 // Renders into the off-screen canvas (if available) so the finished frame is
 // pushed to the panel in a single blit — no visible clear/redraw flicker.
@@ -524,6 +534,9 @@ void drawNavScreen(NavChunk* chunk) {
 
   // 7. Progress arc (very bottom)
   drawProgressArc(chunk);
+
+  // 8. Off-route banner
+  if (isNavRerouting()) drawReroutingBanner();
 
   // Push the completed frame to the panel in one operation.
   if (navUseCanvas) {
@@ -678,6 +691,16 @@ bool navDisplayLoop() {
     }
     // No stall-recovery / auto-request: if no frame arrives, we simply hold
     // the last rendered frame until the GPS pushes trigger a new one.
+
+    // Frames stop while the server reroutes, so redraw the held frame when the
+    // banner turns on or off.
+    static bool bannerShown = false;
+    bool rerouting = isNavRerouting();
+    if (rerouting != bannerShown && navShownValid && !interpRunning) {
+      drawNavScreen(&navShown);
+      lastNavRender = now;
+    }
+    bannerShown = rerouting;
   }
   else if (state == NAV_COMPLETE) {
     if (now - lastNavRender > 500) {

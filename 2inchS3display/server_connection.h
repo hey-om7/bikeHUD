@@ -96,6 +96,11 @@ static NavChunk frameB;        // The frame we're interpolating TO
 static bool frameBReady = false;  // frameB has valid data to interpolate toward
 static bool frameAValid = false;  // frameA has been populated at least once
 
+// Set by the server's REROUTING message, cleared by the first frame on the new
+// route (or REROUTE_FAILED). nav_display.h shows a banner while it is set.
+static bool navRerouting = false;
+static unsigned long navReroutingSince = 0;
+
 // GPS position (populated from real GPS via updateDeviceGPS)
 // double: a 32-bit float only resolves ~1 m at these magnitudes, which showed
 // up as position jitter in the map-matching and therefore in every frame.
@@ -197,6 +202,7 @@ void handleServerMessage(uint8_t *payload, size_t length) {
 
   // --- NAV_CHUNK: navigation data chunk (server-rendered paths) ---
   else if (strcmp(msgType, "NAV_CHUNK") == 0) {
+    navRerouting = false;
     currentChunk.chunkIndex = doc["chunkIndex"] | 0;
     currentChunk.totalChunks = doc["totalChunks"] | 0;
     strlcpy(currentChunk.instruction, doc["instruction"] | "Continue", sizeof(currentChunk.instruction));
@@ -289,6 +295,17 @@ void handleServerMessage(uint8_t *payload, size_t length) {
     hasNewChunk = false;
     memset(&currentChunk, 0, sizeof(currentChunk));
     Serial.println("[NAV] Navigation stopped by server");
+  }
+
+  // --- REROUTING: rider left the route, server is computing a new one ---
+  else if (strcmp(msgType, "REROUTING") == 0) {
+    navRerouting = true;
+    navReroutingSince = millis();
+    Serial.println("[NAV] Off route, rerouting...");
+  }
+  else if (strcmp(msgType, "REROUTE_FAILED") == 0) {
+    navRerouting = false;
+    Serial.println("[NAV] Reroute failed, keeping last route");
   }
 
   // --- NAV_COMPLETE: navigation finished ---
@@ -440,6 +457,11 @@ NavChunk* getFrameA() { return &frameA; }
 NavChunk* getFrameB() { return &frameB; }
 bool isFrameBReady() { return frameBReady; }
 bool isFrameAValid() { return frameAValid; }
+// Banner times out after 20 s so a lost REROUTE_FAILED can't leave it stuck.
+bool isNavRerouting() {
+  if (navRerouting && millis() - navReroutingSince > 20000) navRerouting = false;
+  return navRerouting;
+}
 
 // After interpolation completes (t reaches 1.0), promote frameB to frameA
 // and request the next frame from the server.
@@ -471,6 +493,7 @@ void checkNavComplete() {
 
 // Clear navigation state (after NAV_COMPLETE acknowledged)
 void clearNavigation() {
+  navRerouting = false;
   navState = NAV_IDLE;
   hasNewChunk = false;
   memset(&currentChunk, 0, sizeof(currentChunk));
